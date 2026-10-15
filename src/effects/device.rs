@@ -319,6 +319,38 @@ fn restore_originals(
     restore_selected_originals(dir, journal, afc, session, None)
 }
 
+fn restore_and_verify_originals(
+    dir: &Path,
+    journal: &mut Journal,
+    afc: &mut AfcClient,
+    session: &ActiveDeviceSession,
+) -> Result<()> {
+    // Keep this outside the low-level restoration used by capture error handling:
+    // a failed verification must not recursively begin another verification.
+    restore_originals(dir, journal, afc, session)?;
+    if !journal.combined_sync {
+        // Historical artwork-only journals use acknowledgement-only restoration.
+        // Preserve their transfer policy; protected readback requires combined sync.
+        // Metadata journals require combined sync when loaded and always verify.
+        return Ok(());
+    }
+    if has_captured_metadata(journal) {
+        verify_captured_originals(dir, journal, afc, session)
+    } else {
+        // Capture may have failed before metadata was recovered. Verify only the
+        // artwork that is available, without inventing a metadata preimage.
+        verify_original_artwork(dir, journal, afc, session)?;
+        invalidate_caches(dir, journal, afc, session)
+    }
+}
+
+fn has_captured_metadata(journal: &Journal) -> bool {
+    journal
+        .assets
+        .get(3)
+        .is_some_and(|asset| asset.leaf == "pass.json" && asset.original_sha256.is_some())
+}
+
 fn original_payloads(
     dir: &Path,
     journal: &Journal,
@@ -656,7 +688,7 @@ fn artwork_verification_groups(journal: &Journal) -> Vec<Vec<usize>> {
         .assets
         .iter()
         .enumerate()
-        .filter_map(|(i, a)| (i != 3 && a.original_sha256.is_some()).then_some(i))
+        .filter_map(|(i, a)| (a.leaf != "pass.json" && a.original_sha256.is_some()).then_some(i))
         .collect();
     if journal.kind == JournalKind::MetadataParallax {
         vec![indices]
@@ -666,6 +698,19 @@ fn artwork_verification_groups(journal: &Journal) -> Vec<Vec<usize>> {
 }
 
 fn verify_captured_originals(
+    dir: &Path,
+    journal: &mut Journal,
+    afc: &mut AfcClient,
+    session: &ActiveDeviceSession,
+) -> Result<()> {
+    verify_original_artwork(dir, journal, afc, session)?;
+    // Finish with two metadata-only checks and original reapplication
+    // Keep cache and artwork batches before this sequence
+    invalidate_caches(dir, journal, afc, session)?;
+    verify_original_metadata_roundtrips(dir, journal, afc, session)
+}
+
+fn verify_original_artwork(
     dir: &Path,
     journal: &mut Journal,
     afc: &mut AfcClient,
@@ -681,10 +726,7 @@ fn verify_captured_originals(
             return Err(error);
         }
     }
-    // Finish with two metadata-only checks and original reapplication
-    // Keep cache and artwork batches before this sequence
-    invalidate_caches(dir, journal, afc, session)?;
-    verify_original_metadata_roundtrips(dir, journal, afc, session)
+    Ok(())
 }
 
 fn candidate_payloads(
@@ -838,7 +880,7 @@ fn installation_ready(journal: &Journal) -> bool {
         }
 }
 
-fn install_parallax(dir: &Path, pack: &Path) -> Result<()> {
+fn install_parallax(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result<()> {
     let mut journal = load(dir)?;
     ensure!(
         installation_ready(&journal),
@@ -896,6 +938,7 @@ fn install_parallax(dir: &Path, pack: &Path) -> Result<()> {
         .enumerate()
         .filter_map(|(i, asset)| (i != 3 && asset.original_sha256.is_some()).then_some(i))
         .collect();
+    *needs_recovery = true;
     let recovered = capture_and_return(dir, &mut journal, &mut afc, &session, &originals)?;
     require_roundtrip(&recovered, &originals)?;
     invalidate_caches(dir, &mut journal, &mut afc, &session)?;
@@ -918,10 +961,8 @@ fn install_parallax(dir: &Path, pack: &Path) -> Result<()> {
     if let Err(error) = installation {
         journal.status = "ParallaxInstallFailedRestoreRequired".into();
         save(dir, &journal)?;
-        return media::finish_with_cleanup(
-            Err(error),
-            restore_originals(dir, &mut journal, &mut afc, &session),
-        );
+        // The caller holds the device lock and performs one verified recovery.
+        return Err(error);
     }
     journal.status = "ParallaxCandidateReadbackMatchedAwaitingManualObservation".into();
     save(dir, &journal)?;
@@ -967,32 +1008,44 @@ pub(crate) fn apply(
     config.original_pass_json = capture.join("original-pass.json");
     config.output_directory = directory.join("pack");
     let _lock = DeviceLock::acquire(&binding)?;
+    let mut needs_recovery = false;
     let operation = (|| -> Result<()> {
         progress("Backing up current card metadata and artwork…");
+        needs_recovery = true;
         capture_metadata_for_binding(&capture, binding)?;
+        needs_recovery = false;
         progress("Preparing overlay skin…");
         let pack =
             artwork::prepare_configuration_from_preview(&config, Path::new("."), frozen_layers)?;
         progress("Applying and verifying overlay skin…");
-        install_parallax(&capture, &pack)
+        install_parallax(&capture, &pack, &mut needs_recovery)
     })();
-    if let Err(error) = operation {
-        if capture.join("journal.json").exists() {
+    if capture.join("journal.json").exists() {
+        return finish_apply_result(operation, needs_recovery, || {
             progress("Recovering previous card data…");
-            let cleanup = (|| -> Result<()> {
-                let mut journal = load(&capture)?;
-                let (session, mut afc) = open(&journal.binding)?;
-                restore_originals(&capture, &mut journal, &mut afc, &session)?;
-                journal.status =
-                    "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
-                save(&capture, &journal)
-            })();
-            return media::finish_with_cleanup(Err(error), cleanup)
-                .with_context(|| format!("Recovery backup: {}", capture.display()));
-        }
-        return Err(error);
+            let mut journal = load(&capture)?;
+            let (session, mut afc) = open(&journal.binding)?;
+            restore_and_verify_originals(&capture, &mut journal, &mut afc, &session)?;
+            journal.status = "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
+            save(&capture, &journal)
+        })
+        .with_context(|| format!("Recovery backup: {}", capture.display()));
     }
-    Ok(())
+    operation
+}
+
+fn finish_apply_result(
+    operation: Result<()>,
+    needs_recovery: bool,
+    recover: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    match operation {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let recovery = if needs_recovery { recover() } else { Ok(()) };
+            media::finish_with_cleanup(Err(error), recovery)
+        }
+    }
 }
 
 pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<()> {
@@ -1003,7 +1056,7 @@ pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<()> {
     );
     let _lock = DeviceLock::acquire(&journal.binding)?;
     let (session, mut afc) = open(&journal.binding)?;
-    restore_originals(directory, &mut journal, &mut afc, &session)?;
+    restore_and_verify_originals(directory, &mut journal, &mut afc, &session)?;
     journal.status = "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
     save(directory, &journal)
 }
@@ -1011,6 +1064,97 @@ pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_metadata_detection_preserves_artwork_only_journals() {
+        let mut journal = recovery_capture_fixture();
+        assert!(has_captured_metadata(&journal));
+        journal.assets[3].original_sha256 = None;
+        assert!(!has_captured_metadata(&journal));
+        journal.kind = JournalKind::DynamicPng;
+        journal.assets = leaves()
+            .into_iter()
+            .map(|leaf| Asset {
+                leaf,
+                original_sha256: Some(sha256(b"original")),
+                candidate_sha256: sha256(b"candidate"),
+            })
+            .collect();
+        assert!(!has_captured_metadata(&journal));
+        assert_eq!(
+            artwork_verification_groups(&journal).concat(),
+            (0..9).collect::<Vec<_>>()
+        );
+        journal.kind = JournalKind::ArtworkControl;
+        journal.assets.truncate(3);
+        assert!(!has_captured_metadata(&journal));
+        assert_eq!(
+            artwork_verification_groups(&journal).concat(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn completed_capture_preflight_refusal_does_not_restore_again() {
+        let recoveries = std::cell::Cell::new(0);
+        for refusal in ["missing original artwork", "invalid prepared pack"] {
+            let error = finish_apply_result(Err(anyhow::anyhow!(refusal)), false, || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), refusal);
+        }
+        assert_eq!(recoveries.get(), 0);
+        // Success must never invoke recovery even if mutation was entered.
+        finish_apply_result(Ok(()), true, || {
+            recoveries.set(recoveries.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recoveries.get(), 0);
+    }
+
+    #[test]
+    fn mutation_failure_recovers_once_and_retains_verification_failure() {
+        let recoveries = std::cell::Cell::new(0);
+        let error =
+            finish_apply_result(Err(anyhow::anyhow!("candidate write failed")), true, || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(recoveries.get(), 1);
+        assert_eq!(error.to_string(), "candidate write failed");
+
+        let error =
+            finish_apply_result(Err(anyhow::anyhow!("candidate write failed")), true, || {
+                recoveries.set(recoveries.get() + 1);
+                anyhow::bail!("second metadata readback incomplete")
+            })
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("candidate write failed"));
+        assert!(message.contains("second metadata readback incomplete"));
+        assert_eq!(recoveries.get(), 2);
+    }
+
+    fn recovery_capture_fixture() -> Journal {
+        serde_json::from_value(serde_json::json!({
+            "schema_version":1, "kind":"MetadataCapture", "combined_sync":true,
+            "invalidate_caches":true,
+            "binding":{"udid":"test-phone","build":"23G83","product_type":"iPhone15,4",
+                "card_id":"OM6NYhwXMZrAw0sRUjR62wmF4ZQ=","transport":"Usb"},
+            "status":"MetadataCapturedAndReappliedAwaitingVisualConfirmation",
+            "books":{"files":{},"directories":{},"directory_entries":{}},
+            "roots":[],"held":"airlift-recovered-0123456789abcdef0123",
+            "protected_readback_verified":false,
+            "assets":inventory(&JournalKind::MetadataCapture).iter().map(|leaf|
+                serde_json::json!({"leaf":leaf,
+                    "original_sha256":if leaf.ends_with(".pdf") && !leaf.starts_with("cardBackgroundCombined") { None } else { Some(sha256(b"original")) },
+                    "candidate_sha256":sha256(b"candidate")})).collect::<Vec<_>>()
+        })).unwrap()
+    }
 
     #[test]
     fn capture_return_selects_moved_slots_but_recovery_validates_all_originals() {
