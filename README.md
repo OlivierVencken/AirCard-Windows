@@ -22,6 +22,7 @@
 
 ## Features
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Apple Cash cards.
+- 🪄 **Parallax Card Overlays:** Combine artwork with a transparent overlay for native motion as you tilt your iPhone.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular Cowabunga & Nugget `.passthm` themes directly to iOS lockscreen.
 - ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~7.5 MB). No Python, no Flet, no webview, no bloated runtimes.
 - 🪟 **Material Design 3 Interface:** Clean, modern dark theme built with `egui` and `eframe`.
@@ -88,6 +89,20 @@ If both transports are available, **Auto** uses USB first and falls back to WiFi
 
 ---
 
+## How to Apply a Parallax Card Overlay
+1. Connect one iPhone by USB. Disconnect WiFi sync for this session if the phone also appears over WiFi; overlays require a USB-only connection.
+2. In **Wallet**, select or scan the card and use **Choose Image...** to select the background artwork.
+3. Enable **Overlay**, then use **Choose Overlay...** to select a transparent PNG foreground.
+4. Drag inside **Wallet Preview** to adjust the crop. The preview is static; the applied card uses native parallax motion. Apply stays disabled until the overlay is valid.
+5. Click **Apply Card Skin** and wait for backup, installation and verification to finish.
+6. Force-close and reopen Wallet and Apple Pay to see the result.
+
+Use artwork with background margins and keep the overlay subject away from the crop edges to allow for tilt. PNG files with an opaque checkerboard background do not provide transparency.
+
+In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
+
+---
+
 ## How to Apply Lockscreen Passcode Themes (.passthm)
 1. Switch to the **Passcode** tab in AirCard.
 2. Click **Choose .passthm...** and select any `.passthm` package (Cowabunga or Nugget).
@@ -114,10 +129,10 @@ git clone https://github.com/Lumid-Off/AirCard-Windows.git
 cd AirCard-Windows
 
 # Run tests
-cargo test
+cargo test --locked
 
 # Build release binary
-cargo build --release
+cargo build --locked --release
 ```
 
 The compiled binary will be in `target\release\aircard.exe`.

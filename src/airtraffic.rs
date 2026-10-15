@@ -39,6 +39,46 @@ pub enum SyncEvent {
     Done(Result<()>),
 }
 
+/// Run effects transfers on the caller's thread to avoid recovery races
+/// The caller holds the device lock through staging, sync and cleanup
+pub fn sync_assets_serialized<L>(
+    udid: &str,
+    transport: DeviceTransport,
+    assets: &[(&str, &str)],
+    log: L,
+) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    static NATIVE_SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = NATIVE_SYNC.lock().map_err(|_| {
+        anyhow::anyhow!("Native effects sync lock is poisoned; recovery inspection required")
+    })?;
+    anyhow::ensure!(
+        matches!(transport, DeviceTransport::Usb | DeviceTransport::Wifi),
+        "Effects sync requires a recognized transport"
+    );
+    // Apple routes by UDID; reject phones with ambiguous transport routing
+    let entries = crate::device::query_usbmux_devices()?;
+    anyhow::ensure!(
+        entries
+            .iter()
+            .any(|entry| entry.udid == udid && entry.transport == transport),
+        "Selected effects transport is unavailable"
+    );
+    anyhow::ensure!(
+        !entries
+            .iter()
+            .any(|entry| entry.udid == udid && entry.transport != transport),
+        "Both transports are present; native AirTraffic routing cannot be bound unambiguously"
+    );
+    anyhow::ensure!(
+        !assets.is_empty() && assets.len() <= 64,
+        "Effects transfer requires 1..=64 assets"
+    );
+    sync_assets_via_airtraffic_internal(udid, transport, assets, log)
+}
+
 pub fn sync_assets_via_airtraffic<L>(
     udid: &str,
     transport: DeviceTransport,

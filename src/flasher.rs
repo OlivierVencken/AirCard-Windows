@@ -27,6 +27,9 @@ pub const CACHE_FILES: &[&str] = &[
     "Preview",
 ];
 
+pub const CACHE_EXTENSIONS: [&str; 2] = [".cache", ".pkcache"];
+pub const CACHE_INVALIDATION_PAYLOAD: &[u8] = b"corrupted";
+
 #[link(name = "bcrypt")]
 unsafe extern "system" {
     fn BCryptGenRandom(
@@ -366,13 +369,12 @@ fn invalidate_wallet_caches<F, L>(
     F: FnMut(usize, usize, &str),
     L: FnMut(&str),
 {
-    let cache_leaves: [(&str, &[u8]); 3] = [
-        ("FrontFace", b"corrupted"),
-        ("PlaceHolder", b"corrupted"),
-        ("Preview", b"corrupted"),
-    ];
+    let cache_leaves: Vec<_> = CACHE_FILES
+        .iter()
+        .map(|leaf| (*leaf, CACHE_INVALIDATION_PAYLOAD))
+        .collect();
 
-    for (c_idx, ext) in [".cache", ".pkcache"].iter().enumerate() {
+    for (c_idx, ext) in CACHE_EXTENSIONS.iter().enumerate() {
         let step = 2 + c_idx;
         let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
         progress(step, 3, &format!("Clearing {} cache...", ext));

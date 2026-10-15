@@ -1,3 +1,4 @@
+mod strict;
 use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::Arc;

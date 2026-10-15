@@ -55,6 +55,55 @@ impl Language {
         }
 
         match source {
+            "Overlay" => "叠加图层",
+            "Choose Overlay..." => "选择叠加图层...",
+            "Choose a transparent PNG overlay. The image above is the background." => "选择透明 PNG 叠加图层。上方所选图片用作背景。",
+            "Choose an image and overlay" => "选择图片和叠加图层",
+            "Invalid overlay" => "叠加图层无效",
+            "This overlay has no transparency. Choose a PNG with a transparent background." => "此叠加图层没有透明区域。请选择具有透明背景的 PNG。",
+            "The crop removes all overlay transparency. Adjust the crop or choose another overlay." => "裁切移除了叠加图层的所有透明区域。请调整裁切或选择其他叠加图层。",
+            "This overlay is fully transparent and has no visible artwork. Choose another PNG." => "此叠加图层完全透明，没有可见图案。请选择其他 PNG。",
+            "The visible overlay is outside the crop. Adjust the crop or choose another overlay." => "叠加图层的可见图案位于裁切范围之外。请调整裁切或选择其他叠加图层。",
+            "Loading overlay preview…" => "正在加载叠加图层预览…",
+            "Preparing overlay…" => "正在准备叠加图层…",
+            "Preparing overlay skin…" => "正在准备叠加图层皮肤…",
+            "Applying and verifying overlay skin…" => "正在应用并验证叠加图层皮肤…",
+            "connect one iPhone by USB" => "通过 USB 连接一台 iPhone",
+            "choose overlay" => "选择叠加图层",
+            "wait for a valid overlay preview" => "等待有效的叠加图层预览",
+            "Apply an overlay once to create a recovery backup." => "应用一次叠加图层以创建恢复备份。",
+            "Overlay worker stopped unexpectedly" => "叠加图层工作线程意外停止",
+            "Card" => "卡片",
+            "Select a card" => "选择卡片",
+            "Use an opaque background and a transparent foreground. Images are fitted to the card automatically." => {
+                "使用不透明背景和透明前景。图片会自动适配卡片尺寸。"
+            }
+            "Choose a background and foreground" => "选择背景和前景",
+            "Loading preview…" => "正在加载预览…",
+            "Retry preview" => "重试预览",
+            "Preparing selected images…" => "正在准备所选图片…",
+            "Backing up current card metadata and artwork…" => "正在备份当前卡片数据和图片…",
+            "Recovering previous card data…" => "正在恢复之前的卡片数据…",
+            "Restoring previous skin…" => "正在恢复之前的皮肤…",
+            "Restore previous skin" => "恢复之前的皮肤",
+            "Apply backs up current card data automatically." => "应用前会自动备份当前卡片数据。",
+            "Select a saved card and connect one iPhone by USB. Use the Wallet tab to scan a new card." => {
+                "选择已保存的卡片并通过 USB 连接一台 iPhone。可在钱包选项卡扫描新卡片。"
+            }
+            "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." => {
+                "皮肤已应用。强制关闭并重新打开钱包和 Apple Pay 以查看效果。"
+            }
+            "Previous skin restored. Force-close and reopen Wallet and Apple Pay." => {
+                "之前的皮肤已恢复。请强制关闭并重新打开钱包和 Apple Pay。"
+            }
+            "Background PNG" => "背景 PNG",
+            "Foreground PNG" => "前景 PNG",
+            "No file selected" => "未选择文件",
+            "Effects preview" => "效果预览",
+            "Apply effects" => "应用效果",
+            "Preparing effects…" => "正在准备效果…",
+            "Copy error details" => "复制错误详情",
+            "Effects worker stopped unexpectedly" => "效果工作线程意外停止",
             "Wallet" => "钱包",
             "Passcode" => "锁屏密码",
             "Help" => "帮助",

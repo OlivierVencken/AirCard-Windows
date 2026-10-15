@@ -6,6 +6,7 @@ mod airtraffic;
 mod app;
 mod apple;
 mod device;
+mod effects;
 mod flasher;
 mod image_skin;
 mod i18n;
