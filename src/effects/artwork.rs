@@ -34,6 +34,28 @@ pub struct DynamicConfiguration {
     pub parallax_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutral_emitter: Option<EmitterConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_dissolve: Option<CrossDissolveConfiguration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossDissolveConfiguration {
+    pub intensity: CrossDissolveIntensity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CrossDissolveIntensity {
+    Default,
+}
+
+impl Default for CrossDissolveConfiguration {
+    fn default() -> Self {
+        Self {
+            intensity: CrossDissolveIntensity::Default,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +149,8 @@ pub struct PrepareConfig {
     pub foreground: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emitter_sprite: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_background: Option<PathBuf>,
     pub original_pass_json: PathBuf,
     pub output_directory: PathBuf,
     #[serde(default)]
@@ -142,6 +166,16 @@ impl PrepareConfig {
             "Unsupported authoring schema version"
         );
         self.dynamic_layer_configuration.validate()?;
+        ensure!(
+            self.alternate_background.is_some()
+                == self.dynamic_layer_configuration.cross_dissolve.is_some(),
+            "Choose an alternate background image for cross-dissolve"
+        );
+        ensure!(
+            self.dynamic_layer_configuration.cross_dissolve.is_none()
+                || self.dynamic_layer_configuration.neutral_emitter.is_none(),
+            "Combining cross-dissolve and particles is not supported"
+        );
         ensure!(
             self.emitter_sprite.is_some()
                 == self.dynamic_layer_configuration.neutral_emitter.is_some(),
@@ -516,6 +550,21 @@ pub struct EffectsPreview {
     pub foreground: RgbaImage,
     pub fallback: RgbaImage,
     pub sprite: Option<RgbaImage>,
+    pub alternate_background: Option<RgbaImage>,
+}
+
+impl EffectsPreview {
+    /// An artwork endpoint for inspection, not a simulation of Wallet's radial mask.
+    pub fn alternate_composite(&self) -> Option<RgbaImage> {
+        self.alternate_background.as_ref().map(|alternate| {
+            let (width, height) = self.fallback.dimensions();
+            let x = (alternate.width() - width) / 2;
+            let y = (alternate.height() - height) / 2;
+            let back = image::imageops::crop_imm(alternate, x, y, width, height).to_image();
+            let front = image::imageops::crop_imm(&self.foreground, x, y, width, height).to_image();
+            composite(&back, &front)
+        })
+    }
 }
 
 fn overlay_issue(image: &RgbaImage, cropped: bool) -> Option<&'static str> {
@@ -593,12 +642,32 @@ fn preview_internal(
             )?)?)
         })
         .transpose()?;
+    let alternate_background = config
+        .alternate_background
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let source = decode_background(&read_bounded(&base.join(path), MAX_IMAGE_BYTES)?)?;
+            // Use precisely the same crop focus and bleed as the primary background.
+            let (back, front, _) = aligned_layers(
+                source.clone(),
+                RgbaImage::new(config.canvas.width, config.canvas.height),
+                config,
+                true,
+            )?;
+            Ok(if config.parallax_bleed {
+                padded_layers(&source, &back, &front, config).0
+            } else {
+                back
+            })
+        })
+        .transpose()?;
     Ok(EditorPreview {
         artwork: EffectsPreview {
             background,
             foreground,
             fallback,
             sprite,
+            alternate_background,
         },
         issue,
     })
@@ -622,6 +691,7 @@ pub fn prepare_configuration_from_preview(
         foreground,
         fallback,
         sprite,
+        alternate_background,
     } = frozen;
     let original = read_bounded(&base.join(&config.original_pass_json), MAX_JSON_BYTES)?;
     let (patched, diff) = candidate(&original, &config.dynamic_layer_configuration)?;
@@ -644,6 +714,11 @@ pub fn prepare_configuration_from_preview(
         dimensions.push(sprite.dimensions());
         names.push(("emitter", "neutralEmitter"));
         assets.push(encode_png(&sprite)?);
+    }
+    if let Some(alternate) = alternate_background {
+        dimensions.push(alternate.dimensions());
+        names.push(("alternate_background", "backgroundParallaxCrossDissolve"));
+        assets.push(encode_png(&alternate)?);
     }
     let metadata_bytes = [original, patched, diff];
     let output = base.join(&config.output_directory);
@@ -716,7 +791,24 @@ pub fn preview_pack(directory: &Path) -> Result<EffectsPreview> {
         } else {
             None
         },
+        alternate_background: if pack.contains_cross_dissolve {
+            Some(find("backgroundParallaxCrossDissolve.png")?)
+        } else {
+            None
+        },
     })
+}
+
+#[cfg(test)]
+pub(super) fn trial_configuration(directory: &Path) -> Result<PrepareConfig> {
+    let bytes = read_bounded(&directory.join("manifest.json"), MAX_JSON_BYTES)?;
+    let deployment = load_deployment(directory)?;
+    ensure!(
+        sha256(&bytes) == deployment.manifest_sha256,
+        "Trial manifest changed"
+    );
+    let manifest: Manifest = serde_json::from_value(parse_unique(&bytes)?)?;
+    Ok(manifest.configuration)
 }
 
 /// Prepare artwork only, without reading or creating pass metadata
@@ -729,6 +821,9 @@ pub fn prepare_artwork(config: &PrepareConfig, base: &Path) -> Result<(PathBuf, 
     ];
     if let Some(sprite) = &preview.sprite {
         images.push(("neutralEmitter.png", sprite));
+    }
+    if let Some(alternate) = &preview.alternate_background {
+        images.push(("backgroundParallaxCrossDissolve.png", alternate));
     }
     let mut records = Vec::new();
     let mut encoded = Vec::new();
@@ -796,6 +891,7 @@ pub struct PreparedDeployment {
     pub candidate_metadata: Vec<u8>,
     pub resources: Vec<PreparedResource>,
     pub contains_emitter: bool,
+    pub contains_cross_dissolve: bool,
 }
 
 pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
@@ -821,6 +917,14 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
     let mut names = RESOURCE_NAMES.to_vec();
     if contains_emitter {
         names.push(("emitter", "neutralEmitter"));
+    }
+    let contains_cross_dissolve = manifest
+        .configuration
+        .dynamic_layer_configuration
+        .cross_dissolve
+        .is_some();
+    if contains_cross_dissolve {
+        names.push(("alternate_background", "backgroundParallaxCrossDissolve"));
     }
     ensure!(
         manifest.resources.len() == names.len() && manifest.metadata.len() == 3,
@@ -861,6 +965,12 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
                 (canvas.width, canvas.height)
             };
             ensure!(decoded.dimensions() == expected, "Resource canvas mismatch");
+            if role == "alternate_background" {
+                ensure!(
+                    decoded.pixels().all(|p| p[3] == 255),
+                    "Alternate background is not opaque"
+                );
+            }
             layers.push(decoded);
         }
         resources.push(PreparedResource {
@@ -926,6 +1036,7 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
         candidate_metadata: metadata.remove(0),
         resources,
         contains_emitter,
+        contains_cross_dissolve,
     })
 }
 
@@ -948,6 +1059,91 @@ mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cross_dissolve_freezes_aligned_alternate_and_preserves_base_fallback() {
+        let fixture = Fixture::new();
+        fixture.prepare();
+        let mut config = config();
+        config.canvas = Canvas {
+            width: 20,
+            height: 12,
+        };
+        config.parallax_bleed = true;
+        config.alignment.focus_x = 0.8;
+        let base = preview(&config, &fixture.0).unwrap();
+        let alternate =
+            RgbaImage::from_fn(48, 32, |x, y| Rgba([x as u8 * 4, y as u8 * 6, 180, 255]));
+        alternate.save(fixture.0.join("alternate.png")).unwrap();
+        config.dynamic_layer_configuration.cross_dissolve = Some(Default::default());
+        config.alternate_background = Some("alternate.png".into());
+        let mut reference = config.clone();
+        reference.background = "alternate.png".into();
+        reference.alternate_background = None;
+        reference.dynamic_layer_configuration.cross_dissolve = None;
+        let reference = preview(&reference, &fixture.0).unwrap();
+        config.output_directory = "frozen-cross".into();
+        let (_, frozen) = prepare_artwork(&config, &fixture.0).unwrap();
+        assert_eq!(
+            frozen.alternate_background.as_ref().unwrap(),
+            &reference.background
+        );
+        assert_eq!(frozen.fallback, base.fallback);
+        assert_eq!(frozen.alternate_composite().unwrap(), reference.fallback);
+        // Source changes after freezing cannot change the installed pack.
+        fs::write(fixture.0.join("alternate.png"), b"changed after freeze").unwrap();
+        config.output_directory = "cross-pack".into();
+        let pack = prepare_configuration_from_preview(&config, &fixture.0, frozen).unwrap();
+        let deployment = load_deployment(&pack).unwrap();
+        assert!(deployment.contains_cross_dissolve);
+        assert_eq!(deployment.resources.len(), 4);
+        let loaded = preview_pack(&pack).unwrap();
+        assert_eq!(loaded.fallback, base.fallback);
+        assert_eq!(loaded.alternate_background, Some(reference.background));
+        let mut damaged = loaded.alternate_background.unwrap();
+        damaged.put_pixel(0, 0, Rgba([1, 2, 3, 0]));
+        let bytes = encode_png(&damaged).unwrap();
+        fs::write(pack.join("backgroundParallaxCrossDissolve.png"), &bytes).unwrap();
+        update_manifest(&pack, |manifest| {
+            manifest["resources"][3]["file"]["byte_count"] = bytes.len().into();
+            manifest["resources"][3]["file"]["sha256"] = sha256(&bytes).into();
+        });
+        assert!(
+            load_deployment(&pack)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Alternate background is not opaque")
+        );
+    }
+
+    #[test]
+    fn cross_dissolve_requires_matching_inputs_and_only_default_intensity() {
+        let fixture = Fixture::new();
+        fixture.prepare();
+        let mut config = config();
+        let legacy = serde_json::to_value(&config).unwrap();
+        assert!(legacy.get("alternate_background").is_none());
+        assert!(
+            legacy["dynamic_layer_configuration"]
+                .get("crossDissolve")
+                .is_none()
+        );
+        config.dynamic_layer_configuration.cross_dissolve = Some(Default::default());
+        assert!(preview(&config, &fixture.0).is_err());
+        config.alternate_background = Some("missing.png".into());
+        assert!(preview(&config, &fixture.0).is_err());
+        config.alternate_background = Some("foreground.png".into());
+        assert!(
+            preview(&config, &fixture.0).is_err(),
+            "Transparent foreground is not an opaque alternate background"
+        );
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["dynamic_layer_configuration"]["crossDissolve"]["intensity"] = "high".into();
+        assert!(serde_json::from_value::<PrepareConfig>(value).is_err());
+        config.dynamic_layer_configuration.cross_dissolve = None;
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn wallet_jpeg_and_webp_backgrounds_prepare_the_same_overlay_pixels() {
@@ -1031,10 +1227,12 @@ mod tests {
                 version: 2,
                 parallax_enabled: true,
                 neutral_emitter: None,
+                cross_dissolve: None,
             },
             background: "background.png".into(),
             foreground: "foreground.png".into(),
             emitter_sprite: None,
+            alternate_background: None,
             original_pass_json: "pass.json".into(),
             output_directory: "pack".into(),
             canvas: Canvas {

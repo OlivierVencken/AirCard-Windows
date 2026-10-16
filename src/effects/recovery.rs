@@ -133,7 +133,7 @@ pub(super) fn leaves() -> Vec<String> {
     .collect()
 }
 
-#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum JournalKind {
     // Serialized names remain stable so prior application backups still load
     #[default]
@@ -141,10 +141,43 @@ pub(super) enum JournalKind {
     ArtworkControl,
     MetadataCapture,
     MetadataParallax,
+    MetadataCrossDissolveCapture,
+    MetadataCrossDissolve,
+    FrontFaceCache,
+}
+
+impl JournalKind {
+    pub(super) fn bundle_extension(self) -> &'static str {
+        match self {
+            Self::FrontFaceCache => ".cache",
+            _ => ".pkpass",
+        }
+    }
+    pub(super) fn is_installation(self) -> bool {
+        matches!(self, Self::MetadataParallax | Self::MetadataCrossDissolve)
+    }
+    pub(super) fn has_metadata(self) -> bool {
+        matches!(
+            self,
+            Self::MetadataCapture
+                | Self::MetadataParallax
+                | Self::MetadataCrossDissolveCapture
+                | Self::MetadataCrossDissolve
+        )
+    }
 }
 
 pub(super) fn inventory(kind: &JournalKind) -> Vec<String> {
     match kind {
+        JournalKind::FrontFaceCache => vec!["FrontFace".into()],
+        JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve => {
+            let mut names = inventory(&JournalKind::MetadataCapture);
+            names.extend(
+                [".png", "@2x.png", "@3x.png", ".pdf", "@2x.pdf", "@3x.pdf"]
+                    .map(|suffix| format!("backgroundParallaxCrossDissolve{suffix}")),
+            );
+            names
+        }
         JournalKind::DynamicPng => leaves(),
         JournalKind::ArtworkControl => crate::wallet_backup::CARD_ARTWORK_ASSETS
             .iter()
@@ -205,6 +238,33 @@ pub(super) struct Journal {
     pub(super) assets: Vec<Asset>,
     // A missing export slot remains Unknown
     pub(super) protected_readback_verified: bool,
+    // Explicit operator opt-in; absence remains Unknown, never a fabricated original.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) allow_missing_cross_dissolve_originals: bool,
+}
+
+impl Journal {
+    pub(super) fn allows_missing_original(&self, asset: &Asset) -> bool {
+        self.allow_missing_cross_dissolve_originals
+            && matches!(
+                self.kind,
+                JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
+            )
+            && matches!(
+                asset.leaf.as_str(),
+                "backgroundParallaxCrossDissolve.png"
+                    | "backgroundParallaxCrossDissolve@2x.png"
+                    | "backgroundParallaxCrossDissolve@3x.png"
+            )
+    }
+
+    pub(super) fn incomplete_recovery(&self) -> bool {
+        self.kind.is_installation()
+            && self
+                .assets
+                .iter()
+                .any(|asset| asset.original_sha256.is_none() && self.allows_missing_original(asset))
+    }
 }
 
 pub(super) fn save(dir: &Path, journal: &Journal) -> Result<()> {
@@ -235,6 +295,14 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
         "Journal checksum mismatch"
     );
     let journal: Journal = serde_json::from_slice(bytes)?;
+    ensure!(
+        !journal.allow_missing_cross_dissolve_originals
+            || matches!(
+                journal.kind,
+                JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
+            ),
+        "Cross-dissolve backup exception is invalid for this recovery kind"
+    );
     ensure!(
         journal
             .observed_metadata_sha256
@@ -275,28 +343,25 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
         "Cache invalidation requires combined asset delivery"
     );
     ensure!(
-        !matches!(
-            journal.kind,
-            JournalKind::MetadataCapture | JournalKind::MetadataParallax
-        ) || (journal.combined_sync && journal.invalidate_caches),
+        !journal.kind.has_metadata() || (journal.combined_sync && journal.invalidate_caches),
         "Invalid metadata capture transfer policy"
     );
     ensure!(
-        journal.kind != JournalKind::MetadataParallax
+        !journal.kind.is_installation()
             || journal
                 .trial_pack_sha256
                 .as_ref()
                 .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
         "Parallax installation requires a bound pack checksum"
     );
-    if journal.kind == JournalKind::MetadataParallax {
+    if journal.kind.is_installation() {
         ensure!(
             journal
                 .assets
                 .iter()
                 .enumerate()
                 .filter(|(i, a)| *i <= 3 || a.leaf.ends_with(".png"))
-                .all(|(_, a)| a.original_sha256.is_some()),
+                .all(|(_, a)| a.original_sha256.is_some() || journal.allows_missing_original(a)),
             "Parallax recovery requires every overwritten original including metadata"
         );
     }

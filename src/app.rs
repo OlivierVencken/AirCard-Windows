@@ -1457,6 +1457,8 @@ impl AirCardApp {
                         ui.small(language.text(
                             "Choose a transparent PNG overlay. The image above is the background.",
                         ));
+                        ui.add_space(8.0);
+                        self.overlay_editor.show_cross_dissolve_controls(ui, language);
                     }
                 });
                 if self.overlay_enabled {
@@ -2043,6 +2045,7 @@ mod tests {
             directory: PathBuf,
             stage: usize,
             frames: usize,
+            stage_started: std::time::Instant,
             requested: bool,
             expect_overlay_valid: bool,
         }
@@ -2071,24 +2074,31 @@ mod tests {
                             "overlay-narrow.png"
                         } else if self.stage == 2 {
                             "normal-wide.png"
-                        } else {
+                        } else if self.stage == 3 {
                             "normal-narrow.png"
+                        } else if self.stage == 4 {
+                            "alternate-wide.png"
+                        } else {
+                            "alternate-narrow.png"
                         }))
                         .unwrap();
                     self.stage += 1;
                     self.frames = 0;
+                    self.stage_started = std::time::Instant::now();
                     self.requested = false;
-                    if self.stage == 4 {
+                    let cross_qa = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").is_some();
+                    if self.stage == if cross_qa { 6 } else { 4 } {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         return;
                     }
-                    self.app.overlay_enabled = self.stage < 2;
+                    self.app.overlay_enabled = self.stage < 2 || self.stage >= 4;
+                    if self.stage >= 4 { self.app.overlay_editor.show_alternate_for_qa(); }
                     let size = if self.stage % 2 == 1 { [880.0, 900.0] } else { [1080.0, 820.0] };
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
                 }
                 self.app.update(ctx, frame);
                 self.frames += 1;
-                assert!(self.frames < 900, "Preview did not load during native QA");
+                assert!(self.stage_started.elapsed() < std::time::Duration::from_secs(45), "Preview did not load during native QA");
                 if self.frames > 8 && (if self.app.overlay_enabled { self.app.overlay_editor.preview_ready() } else { self.app.skin.is_some() }) && !self.requested {
                     assert_eq!(self.app.can_apply_card_skin(), !self.app.overlay_enabled || self.expect_overlay_valid, "Apply must reflect overlay validation");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
@@ -2128,6 +2138,9 @@ mod tests {
                 }
                 app.load_skin(&cc.egui_ctx, background);
                 app.overlay_editor.set_overlay_path(overlay);
+                let alternate = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").map(PathBuf::from);
+                app.overlay_editor.set_cross_dissolve(alternate.is_some());
+                if let Some(path) = alternate { app.overlay_editor.set_alternate_background(path); }
                 // Use a synthetic target to check buttons without device operations
                 app.apple_ready = true;
                 app.devices = vec![DeviceInfo { udid: "qa-phone".into(), name:"QA iPhone".into(),
@@ -2140,6 +2153,7 @@ mod tests {
                     directory,
                     stage: 0,
                     frames: 0,
+                    stage_started: std::time::Instant::now(),
                     requested: false,
                     expect_overlay_valid: std::env::var_os("AIRCARD_EFFECTS_QA_EXPECT_INVALID_OVERLAY").is_none(),
                 }))

@@ -30,6 +30,8 @@ struct Draft {
     foreground: Option<PathBuf>,
     alignment: Alignment,
     recovery: Option<Recovery>,
+    cross_dissolve: bool,
+    alternate_background: Option<PathBuf>,
 }
 
 impl Draft {
@@ -41,6 +43,7 @@ impl Draft {
                 version: 2,
                 parallax_enabled: true,
                 neutral_emitter: None,
+                cross_dissolve: self.cross_dissolve.then(Default::default),
             },
             background: self
                 .background
@@ -51,6 +54,15 @@ impl Draft {
                 .clone()
                 .context("Choose a transparent overlay PNG")?,
             emitter_sprite: None,
+            alternate_background: if self.cross_dissolve {
+                Some(
+                    self.alternate_background
+                        .clone()
+                        .context("Choose an alternate background image for cross-dissolve")?,
+                )
+            } else {
+                None
+            },
             original_pass_json: PathBuf::new(),
             output_directory: PathBuf::new(),
             canvas: Canvas::default(),
@@ -61,8 +73,8 @@ impl Draft {
 
 enum Completed {
     Preview(EditorPreview),
-    Applied,
-    Restored,
+    Applied(bool),
+    Restored(bool),
 }
 enum Message {
     Progress(String),
@@ -72,6 +84,8 @@ enum Message {
 pub(crate) struct OverlayEditor {
     draft: Draft,
     preview_texture: Option<egui::TextureHandle>,
+    alternate_texture: Option<egui::TextureHandle>,
+    show_alternate: bool,
     dirty: bool,
     status: Option<String>,
     error: Option<String>,
@@ -89,6 +103,8 @@ impl Default for OverlayEditor {
         Self {
             draft,
             preview_texture: None,
+            alternate_texture: None,
+            show_alternate: false,
             dirty: true,
             status: None,
             error: None,
@@ -104,6 +120,13 @@ fn draft_path() -> PathBuf {
         .join("effects-editor.json")
 }
 
+#[cfg(test)]
+pub(super) fn remember_trial_recovery(binding: Binding, directory: PathBuf) -> Result<()> {
+    let mut editor = OverlayEditor::default();
+    editor.draft.recovery = Some(Recovery { binding, directory });
+    editor.remember()
+}
+
 impl OverlayEditor {
     pub fn busy(&self) -> bool {
         self.receiver.is_some()
@@ -112,6 +135,12 @@ impl OverlayEditor {
     #[cfg(test)]
     pub(crate) fn preview_ready(&self) -> bool {
         self.preview_texture.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_alternate_for_qa(&mut self) {
+        assert!(self.alternate_texture.is_some());
+        self.show_alternate = true;
     }
 
     fn remember(&self) -> Result<()> {
@@ -168,12 +197,18 @@ impl OverlayEditor {
                             self.install(ctx, preview.artwork);
                             self.status = None;
                         }
-                        Ok(Completed::Applied) => {
-                            self.status = Some("Skin applied. Force-close and reopen Wallet and Apple Pay to see the change.".into());
+                        Ok(Completed::Applied(limited)) => {
+                            self.status = Some(if limited {
+                                "Experimental skin applied and bytes verified. Alternate-file recovery is incomplete. Reopen Wallet and Apple Pay and check tilt."
+                            } else { "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." }.into());
                         }
-                        Ok(Completed::Restored) => {
-                            self.status = Some("Previous skin restored. Force-close and reopen Wallet and Apple Pay.".into());
-                            self.draft.recovery = None;
+                        Ok(Completed::Restored(limited)) => {
+                            self.status = Some(if limited {
+                                "Known originals restored and verified. Recovery is incomplete: alternate effect files may remain. Reopen Wallet and Apple Pay and check appearance."
+                            } else { "Previous skin restored. Force-close and reopen Wallet and Apple Pay." }.into());
+                            if !limited {
+                                self.draft.recovery = None;
+                            }
                             if let Err(error) = self.remember() {
                                 self.error =
                                     Some(format!("Could not save editor settings: {error:#}"));
@@ -197,6 +232,16 @@ impl OverlayEditor {
     }
 
     fn install(&mut self, ctx: &egui::Context, preview: EffectsPreview) {
+        self.alternate_texture = preview.alternate_composite().map(|image| {
+            ctx.load_texture(
+                "wallet-cross-dissolve-alternate",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
         // Use the exact flattened fallback produced by pack preparation.
         let image = preview.fallback;
         let dimensions = [image.width() as usize, image.height() as usize];
@@ -208,7 +253,13 @@ impl OverlayEditor {
     }
 
     pub fn preview_texture(&self) -> Option<&egui::TextureHandle> {
-        self.preview_texture.as_ref()
+        if self.show_alternate {
+            self.alternate_texture
+                .as_ref()
+                .or(self.preview_texture.as_ref())
+        } else {
+            self.preview_texture.as_ref()
+        }
     }
     /// Use the Wallet image picker for the background and crop
     pub fn sync_background(&mut self, path: Option<PathBuf>, focus: [f32; 2]) {
@@ -228,6 +279,7 @@ impl OverlayEditor {
     fn invalidate_preview(&mut self) {
         self.dirty = true;
         self.preview_texture = None;
+        self.alternate_texture = None;
         self.error = None;
         self.status = None;
         self.preview_issue = None;
@@ -255,6 +307,83 @@ impl OverlayEditor {
                 self.error = Some(format!("Could not save overlay settings: {error:#}"));
             }
         }
+    }
+
+    pub(crate) fn set_cross_dissolve(&mut self, enabled: bool) {
+        self.draft.cross_dissolve = enabled;
+        self.show_alternate = false;
+        self.invalidate_preview();
+    }
+
+    pub(crate) fn set_alternate_background(&mut self, path: PathBuf) {
+        self.draft.alternate_background = Some(path);
+        self.invalidate_preview();
+    }
+
+    pub fn show_cross_dissolve_controls(&mut self, ui: &mut egui::Ui, language: Language) {
+        let mut enabled = self.draft.cross_dissolve;
+        if ui
+            .checkbox(&mut enabled, language.text("Cross-dissolve"))
+            .changed()
+        {
+            self.set_cross_dissolve(enabled);
+            if let Err(error) = self.remember() {
+                self.error = Some(format!("Could not save overlay settings: {error:#}"));
+            }
+        }
+        if !enabled {
+            return;
+        }
+        if device::experimental_cross_dissolve_enabled() {
+            ui.colored_label(ui.visuals().warn_fg_color, language.text("Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind."));
+        }
+        if ui
+            .button(language.text("Choose Alternate Background..."))
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+                .pick_file()
+        {
+            self.set_alternate_background(path);
+            if let Err(error) = self.remember() {
+                self.error = Some(format!("Could not save overlay settings: {error:#}"));
+            }
+        }
+        if let Some(path) = &self.draft.alternate_background {
+            ui.add(
+                egui::Label::new(
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("image"),
+                )
+                .truncate(),
+            )
+            .on_hover_text(path.display().to_string());
+        } else {
+            ui.small(language.text("Choose an alternate background image for cross-dissolve"));
+        }
+        ui.small(
+            language.text(
+                "The alternate background shows at rest; tilt reveals the base artwork.",
+            ),
+        );
+        ui.add_enabled_ui(self.alternate_texture.is_some(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(
+                    &mut self.show_alternate,
+                    false,
+                    language.text("Base artwork"),
+                );
+                ui.selectable_value(
+                    &mut self.show_alternate,
+                    true,
+                    language.text("Alternate artwork"),
+                );
+            });
+        });
+        ui.small(
+            language.text("Preview shows artwork only; the static fallback uses the base artwork."),
+        );
     }
 
     pub fn update_preview(&mut self, ctx: &egui::Context, device_busy: bool) {
@@ -301,8 +430,9 @@ impl OverlayEditor {
         })();
         match result {
             Ok((config, directory)) => self.start(ctx, move |progress| {
-                device::apply(binding, config, &directory, progress)?;
-                Ok(Completed::Applied)
+                Ok(Completed::Applied(device::apply(
+                    binding, config, &directory, progress,
+                )?))
             }),
             Err(error) => self.error = Some(format!("Could not start Apply: {error:#}")),
         }
@@ -322,8 +452,10 @@ impl OverlayEditor {
         let recovery = self.draft.recovery.clone().unwrap();
         self.start(ctx, move |progress| {
             progress("Restoring previous skin…");
-            device::restore(&recovery.directory, &binding)?;
-            Ok(Completed::Restored)
+            Ok(Completed::Restored(device::restore(
+                &recovery.directory,
+                &binding,
+            )?))
         });
     }
 
@@ -472,6 +604,60 @@ mod tests {
         }
         assert!(editor.error.is_none(), "{:?}", editor.error);
         assert!(editor.ready());
+        editor.set_cross_dissolve(true);
+        assert!(!editor.ready());
+        assert!(
+            editor.draft.configuration().is_err(),
+            "An enabled effect needs its alternate image"
+        );
+        let alternate = directory.join("alternate.png");
+        image::RgbaImage::from_pixel(40, 24, image::Rgba([100, 40, 120, 255]))
+            .save(&alternate)
+            .unwrap();
+        editor.set_alternate_background(alternate.clone());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.ready(), "{:?}", editor.error);
+        let base_id = editor.preview_texture().unwrap().id();
+        editor.show_alternate_for_qa();
+        assert_ne!(editor.preview_texture().unwrap().id(), base_id);
+        assert!(
+            editor.ready(),
+            "Inspecting the alternate does not change Apply eligibility"
+        );
+        let saved: Draft =
+            serde_json::from_slice(&serde_json::to_vec(&editor.draft).unwrap()).unwrap();
+        assert!(saved.cross_dissolve);
+        assert_eq!(saved.alternate_background.as_ref(), Some(&alternate));
+        editor.set_alternate_background(directory.join("missing.png"));
+        assert!(!editor.ready());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.error.is_some());
+        assert!(!editor.ready());
+        assert!(
+            editor.preview_texture().is_none(),
+            "A stale alternate must never be shown"
+        );
+        editor.set_alternate_background(alternate.clone());
+        editor.set_cross_dissolve(false);
+        assert_eq!(editor.draft.alternate_background.as_ref(), Some(&alternate));
+        assert!(
+            editor
+                .draft
+                .configuration()
+                .unwrap()
+                .alternate_background
+                .is_none()
+        );
         editor.sync_background(Some(directory.join("replacement.jpg")), [0.25, 0.5]);
         assert!(
             !editor.ready(),

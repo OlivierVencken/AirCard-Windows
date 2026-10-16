@@ -56,6 +56,16 @@ impl Language {
 
         match source {
             "Overlay" => "叠加图层",
+            "Cross-dissolve" => "交叉溶解",
+            "Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind." => "实验性试用：允许缺少备用图案原件。恢复后可能仍保留备用效果文件。",
+            "Experimental skin applied and bytes verified. Alternate-file recovery is incomplete. Reopen Wallet and Apple Pay and check tilt." => "实验性皮肤已应用并验证字节。备用文件无法完整恢复。请重新打开 Wallet 和 Apple Pay 并检查倾斜效果。",
+            "Known originals restored and verified. Recovery is incomplete: alternate effect files may remain. Reopen Wallet and Apple Pay and check appearance." => "已恢复并验证已知原件。恢复不完整：备用效果文件可能仍然存在。请重新打开 Wallet 和 Apple Pay 并检查外观。",
+            "Choose Alternate Background..." => "选择备用背景...",
+            "Choose an alternate background image for cross-dissolve" => "请选择用于交叉溶解的备用背景图片",
+            "The alternate background shows at rest; tilt reveals the base artwork." => "静止时显示备用背景；倾斜时显示基础图像。",
+            "Base artwork" => "基础图案",
+            "Alternate artwork" => "备用图案",
+            "Preview shows artwork only; the static fallback uses the base artwork." => "预览仅展示图案；静态回退使用基础图案。",
             "Choose Overlay..." => "选择叠加图层...",
             "Choose a transparent PNG overlay. The image above is the background." => "选择透明 PNG 叠加图层。上方所选图片用作背景。",
             "Choose an image and overlay" => "选择图片和叠加图层",

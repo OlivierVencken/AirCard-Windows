@@ -99,6 +99,8 @@ If both transports are available, **Auto** uses USB first and falls back to WiFi
 
 Use artwork with background margins and keep the overlay subject away from the crop edges to allow for tilt. PNG files with an opaque checkerboard background do not provide transparency.
 
+**Cross-dissolve:** With Overlay enabled, select **Cross-dissolve** and **Choose Alternate Background...**. Choose an opaque PNG, JPG or WebP. **Base artwork** and **Alternate artwork** inspect the two compositions; the desktop preview does not simulate the native tilt reveal. The static fallback uses the base artwork. Installation requires recoverable originals for every additional PNG and will refuse missing originals. The alternate background shows at rest; tilting reveals the base artwork while parallax continues.
+
 In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
 
 ---

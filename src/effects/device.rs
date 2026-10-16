@@ -19,6 +19,10 @@ use crate::afc::AfcClient;
 use crate::airlift;
 use crate::device::{ActiveDeviceSession, ConnectionMode, DeviceTransport};
 
+pub(crate) fn experimental_cross_dissolve_enabled() -> bool {
+    std::env::var("AIRCARD_EXPERIMENTAL_CROSS_DISSOLVE_NO_ALTERNATE_BACKUP").as_deref() == Ok("1")
+}
+
 fn random_token() -> Result<String> {
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -102,8 +106,9 @@ fn conduit(
     items: &[(&str, &[u8])],
 ) -> Result<(String, String)> {
     let target = format!(
-        "/var/mobile/Library/Passes/Cards/{}.pkpass",
-        journal.binding.card_id
+        "/var/mobile/Library/Passes/Cards/{}{}",
+        journal.binding.card_id,
+        journal.kind.bundle_extension()
     );
     conduit_to(dir, journal, afc, session, &target, items)
 }
@@ -267,7 +272,7 @@ fn recover_held(dir: &Path, journal: &mut Journal, afc: &mut AfcClient) -> Resul
 fn retain_held_bytes(dir: &Path, journal: &mut Journal, index: usize, bytes: &[u8]) -> Result<()> {
     let hash = sha256(bytes);
     if index == 3
-        && journal.kind == JournalKind::MetadataParallax
+        && journal.kind.is_installation()
         && journal.observed_metadata_sha256.as_ref() == Some(&hash)
     {
         // Keep changed post-boot JSON separate from immutable originals
@@ -278,13 +283,20 @@ fn retain_held_bytes(dir: &Path, journal: &mut Journal, index: usize, bytes: &[u
         );
         return Ok(());
     }
-    if journal.kind == JournalKind::MetadataParallax
+    if journal.kind.is_installation()
         && hash == journal.assets[index].candidate_sha256
         && journal.assets[index].original_sha256.as_ref() != Some(&hash)
     {
         // Trial readback must never replace the immutable original snapshot
         return write_new_or_same(&dir.join(format!("observed-candidate-{index}.bin")), bytes);
     }
+    ensure!(
+        !(journal.kind.is_installation()
+            && journal.assets[index].original_sha256.is_none()
+            && journal.allows_missing_original(&journal.assets[index])),
+        "Unknown-original trial file {} differs from the journaled candidate; retained for investigation",
+        journal.assets[index].leaf
+    );
     if let Some(expected) = &journal.assets[index].original_sha256 {
         ensure!(hash == *expected, "Held original changed");
     }
@@ -594,7 +606,14 @@ fn require_original_bytes(asset: &Asset, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
+fn capture_metadata_for_binding(dir: &Path, binding: Binding, kind: JournalKind) -> Result<()> {
+    ensure!(
+        matches!(
+            kind,
+            JournalKind::MetadataCapture | JournalKind::MetadataCrossDissolveCapture
+        ),
+        "Invalid capture kind"
+    );
     binding.validate()?;
     ensure!(
         crate::scanner::is_valid_card_hash(&binding.card_id),
@@ -604,7 +623,7 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
     fs::create_dir(dir).context("Capture directory must be new")?;
     let mut journal = Journal {
         schema_version: 1,
-        kind: JournalKind::MetadataCapture,
+        kind,
         combined_sync: true,
         invalidate_caches: true,
         last_capture_indices: Vec::new(),
@@ -615,7 +634,7 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
         books: media::snapshot_books(&mut afc)?,
         roots: Vec::new(),
         held: format!("{}{}", airlift::RECOVERED_PREFIX, random_token()?),
-        assets: inventory(&JournalKind::MetadataCapture)
+        assets: inventory(&kind)
             .into_iter()
             .map(|leaf| Asset {
                 leaf,
@@ -624,6 +643,7 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
             })
             .collect(),
         protected_readback_verified: false,
+        allow_missing_cross_dissolve_originals: false,
     };
     save(dir, &journal)?;
     capture_and_return(dir, &mut journal, &mut afc, &session, &[0, 1, 2])?;
@@ -690,7 +710,7 @@ fn artwork_verification_groups(journal: &Journal) -> Vec<Vec<usize>> {
         .enumerate()
         .filter_map(|(i, a)| (a.leaf != "pass.json" && a.original_sha256.is_some()).then_some(i))
         .collect();
-    if journal.kind == JournalKind::MetadataParallax {
+    if journal.kind.is_installation() {
         vec![indices]
     } else {
         indices.chunks(3).map(|group| group.to_vec()).collect()
@@ -867,12 +887,12 @@ fn verify_candidate_export(
 fn installation_ready(journal: &Journal) -> bool {
     journal.roots.is_empty()
         && match journal.kind {
-            JournalKind::MetadataCapture => matches!(
+            JournalKind::MetadataCapture | JournalKind::MetadataCrossDissolveCapture => matches!(
                 journal.status.as_str(),
                 "MetadataCapturedAndReappliedAwaitingVisualConfirmation"
                     | "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation"
             ),
-            JournalKind::MetadataParallax => {
+            JournalKind::MetadataParallax | JournalKind::MetadataCrossDissolve => {
                 journal.status
                     == "ParallaxOriginalsReadbackMatchedAndReappliedAwaitingVisualConfirmation"
             }
@@ -880,32 +900,34 @@ fn installation_ready(journal: &Journal) -> bool {
         }
 }
 
-fn install_parallax(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result<()> {
-    let mut journal = load(dir)?;
-    ensure!(
-        installation_ready(&journal),
-        "A complete verified metadata capture is required"
+fn plan_overlay_installation(
+    journal: &Journal,
+    deployment: &artwork::PreparedDeployment,
+    original: &[u8],
+) -> Result<Vec<(usize, Vec<u8>)>> {
+    let cross_dissolve = matches!(
+        journal.kind,
+        JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
     );
-    let deployment = artwork::load_deployment(pack)?;
     ensure!(
-        journal.kind != JournalKind::MetadataParallax
+        cross_dissolve == deployment.contains_cross_dissolve,
+        "Pack does not match captured effect inventory"
+    );
+    ensure!(
+        !journal.kind.is_installation()
             || journal.trial_pack_sha256.as_ref() == Some(&deployment.manifest_sha256),
         "A repeated installation must use the identical verified pack"
     );
     ensure!(
         !deployment.contains_emitter,
-        "Overlay installation supports parallax only"
+        "Particle installation is not supported in this build"
     );
-    let original = regular_read(
-        &dir.join("original-pass.json"),
-        super::metadata::MAX_JSON_BYTES,
-    )?;
     ensure!(
         deployment.original_metadata == original
             && journal.assets[3].original_sha256.as_deref() == Some(&sha256(&original)),
         "Pack does not bind the exact captured original JSON"
     );
-    let mut planned = vec![(3, deployment.candidate_metadata)];
+    let mut planned = vec![(3, deployment.candidate_metadata.clone())];
     for (index, asset) in journal.assets.iter().enumerate().skip(4) {
         if asset.leaf.ends_with(".pdf") {
             ensure!(
@@ -915,8 +937,9 @@ fn install_parallax(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Resul
             continue;
         }
         ensure!(
-            asset.original_sha256.is_some(),
-            "Every overwritten dynamic PNG requires a captured original"
+            asset.original_sha256.is_some() || journal.allows_missing_original(asset),
+            "Every overwritten dynamic PNG requires a captured original: {}",
+            asset.leaf
         );
         let base = asset.leaf.replace("@2x", "").replace("@3x", "");
         let resource = deployment
@@ -927,9 +950,30 @@ fn install_parallax(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Resul
         planned.push((index, resource.bytes.clone()));
     }
     ensure!(
-        planned.len() == 10,
-        "Minimal parallax requires metadata and nine PNG candidates"
+        planned.len() == if cross_dissolve { 13 } else { 10 },
+        "Overlay candidate inventory does not match the selected effect"
     );
+    Ok(planned)
+}
+
+fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result<()> {
+    let mut journal = load(dir)?;
+    ensure!(
+        installation_ready(&journal),
+        "A complete verified metadata capture is required"
+    );
+    let deployment = artwork::load_deployment(pack)?;
+    if deployment.contains_cross_dissolve && experimental_cross_dissolve_enabled() {
+        journal.allow_missing_cross_dissolve_originals = true;
+        // Durable before opening the installation session or performing preimage checks.
+        save(dir, &journal)?;
+    }
+    let original = regular_read(
+        &dir.join("original-pass.json"),
+        super::metadata::MAX_JSON_BYTES,
+    )?;
+    let planned = plan_overlay_installation(&journal, &deployment, &original)?;
+    let cross_dissolve = deployment.contains_cross_dissolve;
     let (session, mut afc) = open(&journal.binding)?;
     // Recheck preimages before mutation and restore them on any result
     let originals: Vec<_> = journal
@@ -947,7 +991,11 @@ fn install_parallax(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Resul
         write_new_or_same(&dir.join(format!("candidate-{index}.bin")), bytes)?;
         journal.assets[*index].candidate_sha256 = sha256(bytes);
     }
-    journal.kind = JournalKind::MetadataParallax;
+    journal.kind = if cross_dissolve {
+        JournalKind::MetadataCrossDissolve
+    } else {
+        JournalKind::MetadataParallax
+    };
     journal.trial_pack_sha256 = Some(deployment.manifest_sha256);
     journal.status = "ParallaxInstallIntent".into();
     save(dir, &journal)?;
@@ -988,7 +1036,7 @@ pub(crate) fn apply(
     mut config: artwork::PrepareConfig,
     directory: &Path,
     progress: impl Fn(&str),
-) -> Result<()> {
+) -> Result<bool> {
     binding.validate()?;
     ensure!(
         binding.transport == DeviceTransport::Usb,
@@ -1005,6 +1053,10 @@ pub(crate) fn apply(
     let (frozen_artwork, frozen_layers) = artwork::prepare_artwork(&config, Path::new("."))?;
     config.background = frozen_artwork.join("backgroundParallax.png");
     config.foreground = frozen_artwork.join("foregroundParallax.png");
+    if config.alternate_background.is_some() {
+        config.alternate_background =
+            Some(frozen_artwork.join("backgroundParallaxCrossDissolve.png"));
+    }
     config.original_pass_json = capture.join("original-pass.json");
     config.output_directory = directory.join("pack");
     let _lock = DeviceLock::acquire(&binding)?;
@@ -1012,16 +1064,21 @@ pub(crate) fn apply(
     let operation = (|| -> Result<()> {
         progress("Backing up current card metadata and artwork…");
         needs_recovery = true;
-        capture_metadata_for_binding(&capture, binding)?;
+        let kind = if config.dynamic_layer_configuration.cross_dissolve.is_some() {
+            JournalKind::MetadataCrossDissolveCapture
+        } else {
+            JournalKind::MetadataCapture
+        };
+        capture_metadata_for_binding(&capture, binding, kind)?;
         needs_recovery = false;
         progress("Preparing overlay skin…");
         let pack =
             artwork::prepare_configuration_from_preview(&config, Path::new("."), frozen_layers)?;
         progress("Applying and verifying overlay skin…");
-        install_parallax(&capture, &pack, &mut needs_recovery)
+        install_overlay(&capture, &pack, &mut needs_recovery)
     })();
     if capture.join("journal.json").exists() {
-        return finish_apply_result(operation, needs_recovery, || {
+        let result = finish_apply_result(operation, needs_recovery, || {
             progress("Recovering previous card data…");
             let mut journal = load(&capture)?;
             let (session, mut afc) = open(&journal.binding)?;
@@ -1030,8 +1087,12 @@ pub(crate) fn apply(
             save(&capture, &journal)
         })
         .with_context(|| format!("Recovery backup: {}", capture.display()));
+        let limited = load(&capture)?.incomplete_recovery();
+        return result.with_context(|| if limited {
+            "Experimental recovery is incomplete: known originals can be restored, but alternate effect files may remain"
+        } else { "Overlay operation failed" }).map(|()| limited);
     }
-    operation
+    operation.map(|()| false)
 }
 
 fn finish_apply_result(
@@ -1048,7 +1109,7 @@ fn finish_apply_result(
     }
 }
 
-pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<()> {
+pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<bool> {
     let mut journal = load(directory)?;
     ensure!(
         journal.binding == *expected,
@@ -1058,12 +1119,462 @@ pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<()> {
     let (session, mut afc) = open(&journal.binding)?;
     restore_and_verify_originals(directory, &mut journal, &mut afc, &session)?;
     journal.status = "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
-    save(directory, &journal)
+    save(directory, &journal)?;
+    Ok(journal.incomplete_recovery())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_face_cache_capture_is_bound_to_one_cache_leaf() {
+        assert_eq!(inventory(&JournalKind::FrontFaceCache), ["FrontFace"]);
+        assert_eq!(JournalKind::FrontFaceCache.bundle_extension(), ".cache");
+        for kind in [
+            JournalKind::MetadataCapture,
+            JournalKind::MetadataParallax,
+            JournalKind::MetadataCrossDissolveCapture,
+            JournalKind::MetadataCrossDissolve,
+        ] {
+            assert_eq!(kind.bundle_extension(), ".pkpass");
+        }
+        assert!(!JournalKind::FrontFaceCache.has_metadata());
+        assert!(!JournalKind::FrontFaceCache.is_installation());
+    }
+
+    #[test]
+    #[ignore = "Journaled capture and byte-identical return of the bound card's .cache/FrontFace; no invalidation or candidate installation"]
+    fn cross_dissolve_native_capture_front_face_cache() {
+        let result = (|| -> Result<()> {
+            let application = PathBuf::from(
+                std::env::var_os("AIRCARD_CROSS_DISSOLVE_TRIAL_APPLICATION")
+                    .context("Set the bound trial application")?,
+            );
+            let binding = load(&application.join("recovery"))?.binding;
+            let _lock = DeviceLock::acquire(&binding)?;
+            let (session, mut afc) = open(&binding)?;
+            let directory = new_application_directory()?;
+            let capture = directory.join("recovery");
+            fs::create_dir(&capture)?;
+            println!(
+                "FrontFace cache observation directory: {}",
+                directory.display()
+            );
+            let mut journal = Journal {
+                schema_version: 1,
+                kind: JournalKind::FrontFaceCache,
+                combined_sync: true,
+                invalidate_caches: false,
+                last_capture_indices: Vec::new(),
+                trial_pack_sha256: None,
+                observed_metadata_sha256: None,
+                binding,
+                status: "FrontFaceCacheCapturePrepared".into(),
+                books: media::snapshot_books(&mut afc)?,
+                roots: Vec::new(),
+                held: format!("{}{}", airlift::RECOVERED_PREFIX, random_token()?),
+                assets: vec![Asset {
+                    leaf: "FrontFace".into(),
+                    original_sha256: None,
+                    candidate_sha256: sha256(b""),
+                }],
+                protected_readback_verified: false,
+                allow_missing_cross_dissolve_originals: false,
+            };
+            save(&capture, &journal)?;
+            let operation = (|| -> Result<Vec<usize>> {
+                let recovered =
+                    capture_and_return(&capture, &mut journal, &mut afc, &session, &[0])?;
+                if recovered == [0] {
+                    let verified =
+                        capture_and_return(&capture, &mut journal, &mut afc, &session, &[0])?;
+                    require_roundtrip(&verified, &[0])?;
+                }
+                Ok(recovered)
+            })();
+            let recovered = match operation {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    return media::finish_with_cleanup(
+                        Err(error),
+                        restore_originals(&capture, &mut journal, &mut afc, &session),
+                    );
+                }
+            };
+            journal.status = if recovered == [0] {
+                "FrontFaceCacheCapturedReappliedAndReadbackMatched"
+            } else {
+                "FrontFaceCacheUnknown"
+            }
+            .into();
+            save(&capture, &journal)?;
+            let summary = if recovered == [0] {
+                let bytes = regular_read(&capture.join("original-0.bin"), media::MAX_FILE_BYTES)?;
+                serde_json::json!({"state":"RecoveredAndVerified","bytes":bytes.len(),"sha256":sha256(&bytes),
+                    "is_invalidation_marker":bytes==crate::flasher::CACHE_INVALIDATION_PAYLOAD,
+                    "prefix_hex":bytes.iter().take(24).map(|byte|format!("{byte:02x}")).collect::<String>(),
+                    "invalidation_performed":false,"trial_recovery_selection_unchanged":true})
+            } else {
+                serde_json::json!({"state":"Unknown","invalidation_performed":false})
+            };
+            write_new_or_same(
+                &directory.join("front-face-cache-observation.json"),
+                &serde_json::to_vec_pretty(&summary)?,
+            )?;
+            println!("{}", serde_json::to_string(&summary)?);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            panic!("FrontFace cache capture failed: {error:#}");
+        }
+    }
+
+    #[test]
+    #[ignore = "Restore known pretrial originals on the bound USB phone; alternate-file recovery remains incomplete"]
+    fn cross_dissolve_native_restore_known_originals() {
+        let result = (|| -> Result<()> {
+            let application = PathBuf::from(
+                std::env::var_os("AIRCARD_CROSS_DISSOLVE_TRIAL_APPLICATION")
+                    .context("Set the trial application directory")?,
+            );
+            let directory = application.join("recovery");
+            let journal = load(&directory)?;
+            ensure!(
+                journal.kind == JournalKind::MetadataCrossDissolve
+                    && journal.allow_missing_cross_dissolve_originals,
+                "Select the explicitly authorized cross-dissolve trial"
+            );
+            let limited = restore(&directory, &journal.binding)?;
+            write_new_or_same(
+                &application.join("trial-restoration-result.json"),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "known_originals_restored_and_verified":true,
+                    "recovery_incomplete":limited,
+                    "protected_alternate_file_removal_performed":false,
+                    "visible_restoration_confirmed":false
+                }))?,
+            )?;
+            println!(
+                "Known pretrial originals restored and verified. Alternate-file recovery incomplete: {limited}. Reopen Wallet and Apple Pay to confirm appearance and parallax."
+            );
+            Ok(())
+        })();
+        if let Err(error) = result {
+            panic!("Trial restoration failed: {error:#}");
+        }
+    }
+
+    #[test]
+    #[ignore = "Journaled post-boot capture on the bound USB phone; relocates and reapplies current files"]
+    fn cross_dissolve_native_post_boot_capture() {
+        let result = (|| -> Result<()> {
+            let source = PathBuf::from(
+                std::env::var_os("AIRCARD_CROSS_DISSOLVE_TRIAL_APPLICATION")
+                    .context("Set the installed trial application directory")?,
+            );
+            let installed = load(&source.join("recovery"))?;
+            ensure!(
+                installed.kind == JournalKind::MetadataCrossDissolve && installed.roots.is_empty(),
+                "Source is not a clean cross-dissolve installation"
+            );
+            let deployment = artwork::load_deployment(&source.join("pack"))?;
+            ensure!(
+                installed.trial_pack_sha256.as_ref() == Some(&deployment.manifest_sha256),
+                "Trial pack binding differs"
+            );
+            let directory = new_application_directory()?;
+            let capture = directory.join("recovery");
+            println!("Post-boot observation directory: {}", directory.display());
+            write_new_or_same(
+                &directory.join("observation-source.json"),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "installed_trial":source, "purpose":"Capture and reapply post-boot bytes; preserve trial recovery selection",
+                    "installed_manifest_sha256":deployment.manifest_sha256
+                }))?,
+            )?;
+            let _lock = DeviceLock::acquire(&installed.binding)?;
+            let operation = capture_metadata_for_binding(
+                &capture,
+                installed.binding.clone(),
+                JournalKind::MetadataCrossDissolveCapture,
+            );
+            finish_apply_result(operation, true, || {
+                if !capture.join("journal.json").exists() {
+                    return Ok(());
+                }
+                let mut journal = load(&capture)?;
+                let (session, mut afc) = open(&journal.binding)?;
+                restore_and_verify_originals(&capture, &mut journal, &mut afc, &session)
+            })?;
+            let observed = load(&capture)?;
+            let metadata = regular_read(
+                &capture.join("original-pass.json"),
+                super::super::metadata::MAX_JSON_BYTES,
+            )?;
+            let parsed = super::super::metadata::parse_unique(&metadata)?;
+            let resource_comparisons: Vec<_> = installed.assets.iter().zip(&observed.assets).enumerate()
+                .filter(|(index, _)| source.join(format!("recovery/candidate-{index}.bin")).is_file())
+                .map(|(_, (candidate, actual))| serde_json::json!({
+                    "leaf":candidate.leaf,
+                    "state":match &actual.original_sha256 { None => "Unknown", Some(hash) if hash==&candidate.candidate_sha256 => "CandidateMatched", Some(_) => "DifferentBytes" },
+                    "candidate_sha256":candidate.candidate_sha256, "observed_sha256":actual.original_sha256
+                })).collect();
+            let summary = serde_json::json!({
+                "metadata_matches_installed_candidate":metadata==deployment.candidate_metadata,
+                "observed_dynamic_configuration":parsed.get("dynamicLayerConfiguration"),
+                "resources":resource_comparisons, "pending_roots":observed.roots.len(),
+                "trial_recovery_selection_unchanged":true
+            });
+            write_new_or_same(
+                &directory.join("post-boot-comparison.json"),
+                &serde_json::to_vec_pretty(&summary)?,
+            )?;
+            println!("{}", serde_json::to_string(&summary)?);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            panic!("Post-boot capture failed: {error:#}");
+        }
+    }
+
+    #[test]
+    #[ignore = "Operator-authorized cross-dissolve installation on the bound USB phone; requires explicit source and opt-in"]
+    fn cross_dissolve_native_trial_from_saved_artwork() {
+        let result = (|| -> Result<()> {
+            ensure!(
+                experimental_cross_dissolve_enabled(),
+                "Explicit cross-dissolve trial opt-in is required"
+            );
+            let source = PathBuf::from(
+                std::env::var_os("AIRCARD_CROSS_DISSOLVE_TRIAL_SOURCE")
+                    .context("Set the prior application directory")?,
+            );
+            let previous = load(&source.join("recovery"))?;
+            ensure!(
+                previous.kind == JournalKind::MetadataCrossDissolveCapture
+                    && installation_ready(&previous),
+                "Source must be a completed cross-dissolve capture with no candidate installation"
+            );
+            original_payloads(&source.join("recovery"), &previous, None)?;
+            let deployment = artwork::load_deployment(&source.join("pack"))?;
+            ensure!(
+                deployment.contains_cross_dissolve && !deployment.contains_emitter,
+                "Source is not a background-only cross-dissolve pack"
+            );
+            let original = regular_read(
+                &source.join("recovery/original-pass.json"),
+                super::super::metadata::MAX_JSON_BYTES,
+            )?;
+            ensure!(
+                deployment.original_metadata == original
+                    && previous.assets[3].original_sha256.as_deref() == Some(&sha256(&original)),
+                "Source metadata binding differs"
+            );
+            let mut config = artwork::trial_configuration(&source.join("pack"))?;
+            let frozen = artwork::preview_pack(&source.join("pack"))?;
+            let directory = new_application_directory()?;
+            let capture = directory.join("recovery");
+            println!("Trial application directory: {}", directory.display());
+            write_new_or_same(
+                &directory.join("trial-source.json"),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "source_application":source, "source_manifest_sha256":deployment.manifest_sha256,
+                    "allow_missing_cross_dissolve_originals":true,
+                    "scope":"Only unknown alternate-background PNG originals; metadata and base artwork remain required",
+                    "visual_motion_observed":false
+                }))?,
+            )?;
+            let artwork_directory = directory.join("artwork");
+            fs::create_dir(&artwork_directory)?;
+            for resource in &deployment.resources {
+                write_new_or_same(&artwork_directory.join(&resource.filename), &resource.bytes)?;
+            }
+            config.background = artwork_directory.join("backgroundParallax.png");
+            config.foreground = artwork_directory.join("foregroundParallax.png");
+            config.alternate_background =
+                Some(artwork_directory.join("backgroundParallaxCrossDissolve.png"));
+            config.original_pass_json = capture.join("original-pass.json");
+            config.output_directory = directory.join("pack");
+            // Persist the UI recovery pointer before any phone mutation.
+            super::super::editor::remember_trial_recovery(
+                previous.binding.clone(),
+                capture.clone(),
+            )?;
+            let _lock = DeviceLock::acquire(&previous.binding)?;
+            let mut needs_recovery = true;
+            let operation = (|| -> Result<()> {
+                println!("Capturing and verifying the current bound card...");
+                capture_metadata_for_binding(
+                    &capture,
+                    previous.binding.clone(),
+                    JournalKind::MetadataCrossDissolveCapture,
+                )?;
+                needs_recovery = false;
+                let current = load(&capture)?;
+                ensure!(
+                    previous
+                        .assets
+                        .iter()
+                        .zip(&current.assets)
+                        .all(|(old, new)| old.original_sha256.is_none()
+                            || old.original_sha256 == new.original_sha256),
+                    "Known preimages changed since the selected source capture; trial stopped after verified capture"
+                );
+                let pack =
+                    artwork::prepare_configuration_from_preview(&config, Path::new("."), frozen)?;
+                println!("Installing and verifying the cross-dissolve candidate...");
+                install_overlay(&capture, &pack, &mut needs_recovery)
+            })();
+            let operation = finish_apply_result(operation, needs_recovery, || {
+                if !capture.join("journal.json").exists() {
+                    return Ok(());
+                }
+                let mut journal = load(&capture)?;
+                let (session, mut afc) = open(&journal.binding)?;
+                restore_and_verify_originals(&capture, &mut journal, &mut afc, &session)?;
+                journal.status =
+                    "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
+                save(&capture, &journal)
+            });
+            write_new_or_same(
+                &directory.join("trial-result.json"),
+                &serde_json::to_vec_pretty(&serde_json::json!({
+                    "candidate_installation_and_readbacks_passed":operation.is_ok(),
+                    "error":operation.as_ref().err().map(|error| format!("{error:#}")),
+                    "recovery_directory":capture, "visual_motion_observed":false,
+                    "recovery_limit":"Unknown alternate originals cannot be restored; effect files may remain"
+                }))?,
+            )?;
+            operation?;
+            println!(
+                "Candidate readbacks passed. Reopen Wallet and Apple Pay and inspect tilt. Motion is not yet observed; alternate-file recovery is incomplete."
+            );
+            Ok(())
+        })();
+        if let Err(error) = result {
+            panic!("Cross-dissolve trial failed: {error:#}");
+        }
+    }
+
+    #[test]
+    fn cross_dissolve_planning_requires_all_preimages_and_matching_inventory() {
+        let mut journal = recovery_capture_fixture();
+        let legacy = inventory(&JournalKind::MetadataCapture);
+        journal.kind = JournalKind::MetadataCrossDissolveCapture;
+        let expanded = inventory(&journal.kind);
+        assert_eq!(expanded.len(), 28);
+        assert_eq!(&expanded[..22], &legacy);
+        journal
+            .assets
+            .extend(expanded[22..].iter().map(|leaf| Asset {
+                leaf: leaf.clone(),
+                original_sha256: leaf.ends_with(".png").then(|| sha256(b"original")),
+                candidate_sha256: sha256(b"candidate"),
+            }));
+        let deployment = artwork::PreparedDeployment {
+            manifest_sha256: sha256(b"cross-pack"),
+            original_metadata: b"original".to_vec(),
+            candidate_metadata: b"candidate".to_vec(),
+            contains_emitter: false,
+            contains_cross_dissolve: true,
+            resources: [
+                "backgroundParallax",
+                "foregroundParallax",
+                "dynamicLayerStaticFallback",
+                "backgroundParallaxCrossDissolve",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, base)| artwork::PreparedResource {
+                filename: format!("{base}.png"),
+                bytes: vec![index as u8],
+            })
+            .collect(),
+        };
+        assert!(installation_ready(&journal));
+        let plan = plan_overlay_installation(&journal, &deployment, b"original").unwrap();
+        assert_eq!(plan.len(), 13);
+        assert_eq!(plan[0], (3, b"candidate".to_vec()));
+        for index in 22..25 {
+            assert_eq!(plan.iter().find(|(i, _)| *i == index).unwrap().1, vec![3]);
+            journal.assets[index].original_sha256 = None;
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+            journal.allow_missing_cross_dissolve_originals = true;
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_ok());
+            assert!(
+                journal.assets[index].original_sha256.is_none(),
+                "Opt-in must not invent an original"
+            );
+            journal.allow_missing_cross_dissolve_originals = false;
+            journal.assets[index].original_sha256 = Some(sha256(b"original"));
+        }
+        journal.assets[25].original_sha256 = Some(sha256(b"competing pdf"));
+        assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+        journal.assets[25].original_sha256 = None;
+        assert!(plan_overlay_installation(&journal, &deployment, b"other metadata").is_err());
+        journal.kind = JournalKind::MetadataCapture;
+        assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+        journal.kind = JournalKind::MetadataCrossDissolve;
+        journal.trial_pack_sha256 = Some(sha256(b"other pack"));
+        assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+        journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
+        assert!(plan_overlay_installation(&journal, &deployment, b"original").is_ok());
+
+        // New recovery journals retain their inventory on restart and never accept
+        // unknown overwritten PNG originals. This test opens no native session.
+        let dir = std::env::temp_dir().join(format!(
+            "aircard-cross-recovery-{}",
+            random_token().unwrap()
+        ));
+        fs::create_dir(&dir).unwrap();
+        save(&dir, &journal).unwrap();
+        assert_eq!(load(&dir).unwrap().kind, JournalKind::MetadataCrossDissolve);
+        journal.assets[22].original_sha256 = None;
+        save(&dir, &journal).unwrap();
+        assert!(load(&dir).is_err());
+        journal.allow_missing_cross_dissolve_originals = true;
+        save(&dir, &journal).unwrap();
+        assert!(load(&dir).unwrap().incomplete_recovery());
+        retain_held_bytes(&dir, &mut journal, 22, b"candidate").unwrap();
+        assert!(!dir.join("original-22.bin").exists());
+        assert!(journal.assets[22].original_sha256.is_none());
+        assert!(retain_held_bytes(&dir, &mut journal, 22, b"replacement file").is_err());
+        for index in [3, 4] {
+            journal.assets[index].original_sha256 = None;
+            save(&dir, &journal).unwrap();
+            assert!(
+                load(&dir).is_err(),
+                "Metadata and base parallax originals remain mandatory"
+            );
+            journal.assets[index].original_sha256 = Some(sha256(b"original"));
+        }
+        journal.assets[25].original_sha256 = Some(sha256(b"pdf"));
+        assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+        journal.assets[25].original_sha256 = None;
+        journal.kind = JournalKind::MetadataParallax;
+        save(&dir, &journal).unwrap();
+        assert!(
+            load(&dir).is_err(),
+            "The cross-dissolve opt-in cannot alter parallax journals"
+        );
+        journal.kind = JournalKind::MetadataCrossDissolve;
+        journal.allow_missing_cross_dissolve_originals = false;
+        journal.assets[22].original_sha256 = Some(sha256(b"original"));
+        write_new_or_same(&dir.join("original-22.bin"), b"original").unwrap();
+        retain_held_bytes(&dir, &mut journal, 22, b"candidate").unwrap();
+        assert_eq!(fs::read(dir.join("original-22.bin")).unwrap(), b"original");
+        assert_eq!(
+            fs::read(dir.join("observed-candidate-22.bin")).unwrap(),
+            b"candidate"
+        );
+        assert!(retain_held_bytes(&dir, &mut journal, 22, b"unknown bytes").is_err());
+        assert_eq!(
+            artwork_verification_groups(&journal),
+            vec![vec![0, 1, 2, 4, 5, 6, 10, 11, 12, 16, 17, 18, 22, 23, 24]]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn recovery_metadata_detection_preserves_artwork_only_journals() {

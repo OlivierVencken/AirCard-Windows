@@ -124,6 +124,21 @@ pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<
     );
     let dynamic = serde_json::to_value(config)?;
     if let Some(existing) = object.get("dynamicLayerConfiguration") {
+        let parallax_only = serde_json::json!({"version":2,"parallaxEnabled":true});
+        if existing == &parallax_only
+            && config.cross_dissolve.is_some()
+            && config.neutral_emitter.is_none()
+        {
+            object.insert("dynamicLayerConfiguration".into(), dynamic.clone());
+            let diff = serde_json::json!({
+                "original_sha256": sha256(original),
+                "changes": [{"operation":"add", "path":"/dynamicLayerConfiguration/crossDissolve", "value":dynamic["crossDissolve"]}]
+            });
+            return Ok((
+                serde_json::to_vec_pretty(&value)?,
+                serde_json::to_vec_pretty(&diff)?,
+            ));
+        }
         ensure!(
             existing == &dynamic,
             "This card has a different effects configuration; it cannot be replaced automatically"
@@ -150,12 +165,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cross_dissolve_upgrades_only_exact_parallax_and_preserves_repeat_bytes() {
+        let mut config = DynamicConfiguration {
+            version: 2,
+            parallax_enabled: true,
+            neutral_emitter: None,
+            cross_dissolve: Some(Default::default()),
+        };
+        let original = br#" {"serialNumber":"captured","large":1844674407370955161601,"dynamicLayerConfiguration":{"parallaxEnabled":true,"version":2}} "#;
+        let (bytes, diff) = candidate(original, &config).unwrap();
+        let value = parse_unique(&bytes).unwrap();
+        assert_eq!(
+            value["dynamicLayerConfiguration"]["crossDissolve"],
+            serde_json::json!({"intensity":"default"})
+        );
+        assert_eq!(value["large"].to_string(), "1844674407370955161601");
+        assert_eq!(
+            parse_unique(&diff).unwrap()["changes"][0]["path"],
+            "/dynamicLayerConfiguration/crossDissolve"
+        );
+        assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
+        for existing in [
+            serde_json::json!({"version":2,"parallaxEnabled":true,"extra":true}),
+            serde_json::json!({"version":2,"parallaxEnabled":false}),
+            serde_json::json!({"version":2,"parallaxEnabled":true,"neutralEmitter":{"style":"twinkling","density":"low","physicsEffect":"off"}}),
+            serde_json::json!({"version":2,"parallaxEnabled":true,"crossDissolve":{"intensity":"high"}}),
+        ] {
+            let input = serde_json::to_vec(
+                &serde_json::json!({"serialNumber":"test","dynamicLayerConfiguration":existing}),
+            )
+            .unwrap();
+            assert!(candidate(&input, &config).is_err());
+        }
+        config.cross_dissolve = None;
+        assert!(
+            candidate(&bytes, &config).is_err(),
+            "Disabling must not silently replace installed effects; restore first"
+        );
+    }
+
+    #[test]
     fn changing_artwork_preserves_existing_parallax_metadata_exactly() {
         let original = b" {\"serialNumber\":\"test\", \"dynamicLayerConfiguration\":{\"parallaxEnabled\":true,\"version\":2},\"opaque\":1844674407370955161601}\n";
         let config = DynamicConfiguration {
             version: 2,
             parallax_enabled: true,
             neutral_emitter: None,
+            cross_dissolve: None,
         };
         let (bytes, diff) = candidate(original, &config).unwrap();
         assert_eq!(bytes, original);
@@ -195,6 +251,7 @@ mod tests {
             version: 2,
             parallax_enabled: true,
             neutral_emitter: None,
+            cross_dissolve: None,
         };
         let (bytes, diff) = candidate(original, &config).unwrap();
         let mut patched = parse_unique(&bytes).unwrap();
@@ -219,6 +276,7 @@ mod tests {
             version: 2,
             parallax_enabled: true,
             neutral_emitter: None,
+            cross_dissolve: None,
         };
         let (bytes, _) = candidate(original, &config).unwrap();
         let before = parse_unique(original).unwrap();
