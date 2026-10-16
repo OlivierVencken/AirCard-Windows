@@ -117,6 +117,10 @@ Normal transaction installation requires recoverable originals for the SVG and a
 
 To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; there is no animation-test button. One GUI trial completed installation and candidate readbacks, but visible transaction animation remains unvalidated.
 
+**Particles (experimental):** With Overlay enabled, select a transparent PNG with **Choose Particle PNG...**. The native preset uses twinkling, low density and physics off. It can combine with cross-dissolve and transaction effects; the preview stays static. Normal launches require recoverable originals for every overwritten resource.
+
+**Explicit particle trial:** After building the release executable, close AirCard and run [`try-particles-experimental.cmd`](try-particles-experimental.cmd). It permits unknown originals only for `neutralEmitter.png`, `neutralEmitter@2x.png` and `neutralEmitter@3x.png`. Metadata, base, alternate and transaction originals remain required. Restore may leave those three files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
+
 In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
 
 ---

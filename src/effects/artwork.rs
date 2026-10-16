@@ -200,11 +200,6 @@ impl PrepareConfig {
             "Choose an alternate background image for cross-dissolve"
         );
         ensure!(
-            self.dynamic_layer_configuration.cross_dissolve.is_none()
-                || self.dynamic_layer_configuration.neutral_emitter.is_none(),
-            "Combining cross-dissolve and particles is not supported"
-        );
-        ensure!(
             self.emitter_sprite.is_some()
                 == self.dynamic_layer_configuration.neutral_emitter.is_some(),
             "neutralEmitter configuration and emitter_sprite must be supplied together"
@@ -1198,6 +1193,67 @@ mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn particles_freeze_with_cross_dissolve_and_transaction_without_changing_fallback() {
+        for cross in [false, true] {
+            for transaction in [false, true] {
+                let fixture = Fixture::new();
+                fixture.prepare();
+                let mut cfg = config();
+                cfg.dynamic_layer_configuration.cross_dissolve = cross.then(Default::default);
+                cfg.alternate_background = cross.then(|| "background.png".into());
+                cfg.dynamic_layer_configuration.transaction_effect =
+                    transaction.then(Default::default);
+                if transaction {
+                    fs::write(
+                        fixture.0.join("shape.svg"),
+                        br#"<svg width="100" height="100"><path d="M50 5L95 95L5 95Z"/></svg>"#,
+                    )
+                    .unwrap();
+                    cfg.transaction_sprite = Some("foreground.png".into());
+                    cfg.transaction_shape = Some("shape.svg".into());
+                }
+                let base = preview(&cfg, &fixture.0).unwrap();
+                let mut original = serde_json::json!({"serialNumber":"retained", "dynamicLayerConfiguration":cfg.dynamic_layer_configuration});
+                original["dynamicLayerConfiguration"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("neutralEmitter");
+                fs::write(
+                    fixture.0.join(&cfg.original_pass_json),
+                    serde_json::to_vec(&original).unwrap(),
+                )
+                .unwrap();
+                cfg.dynamic_layer_configuration.neutral_emitter = Some(EmitterConfiguration {
+                    style: EmitterStyle::Twinkling,
+                    density: EmitterDensity::Low,
+                    physics_effect: EmitterPhysics::Off,
+                });
+                cfg.emitter_sprite = Some("foreground.png".into());
+                cfg.output_directory = "frozen-combined".into();
+                let (frozen_dir, frozen) = prepare_artwork(&cfg, &fixture.0).unwrap();
+                assert_eq!(frozen.fallback, base.fallback);
+                assert_eq!(frozen.alternate_background, base.alternate_background);
+                assert!(frozen_dir.join("neutralEmitter.png").is_file());
+                let sprite = frozen.sprite.clone();
+                fs::write(fixture.0.join("foreground.png"), b"changed after freezing").unwrap();
+                cfg.output_directory = "combined-pack".into();
+                let pack = prepare_configuration_from_preview(&cfg, &fixture.0, frozen).unwrap();
+                let deployment = load_deployment(&pack).unwrap();
+                assert!(deployment.contains_emitter);
+                assert_eq!(
+                    deployment.resources.len(),
+                    4 + usize::from(cross) + if transaction { 2 } else { 0 }
+                );
+                let loaded = preview_pack(&pack).unwrap();
+                assert_eq!(loaded.sprite, sprite);
+                assert_eq!(loaded.fallback, base.fallback);
+                assert_eq!(loaded.transaction_shape, base.transaction_shape);
+                assert_eq!(loaded.alternate_background, base.alternate_background);
+            }
+        }
+    }
 
     #[test]
     fn transaction_freezes_svg_and_sprite_preserves_fallback_and_detects_tampering() {

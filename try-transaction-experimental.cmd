@@ -10,5 +10,6 @@ echo Restore may leave three transaction emitter PNGs and the shape SVG behind.
 set "AIRCARD_EXPERIMENTAL_PARALLAX_NO_DYNAMIC_BACKUP="
 set "AIRCARD_EXPERIMENTAL_CROSS_DISSOLVE_NO_ALTERNATE_BACKUP="
 set "AIRCARD_EXPERIMENTAL_TRANSACTION_NO_ASSET_BACKUP=1"
+set "AIRCARD_EXPERIMENTAL_PARTICLES_NO_EMITTER_BACKUP="
 start "" "%~dp0target\release\aircard.exe"
 endlocal

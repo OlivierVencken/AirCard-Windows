@@ -1459,6 +1459,7 @@ impl AirCardApp {
                         ));
                         ui.add_space(8.0);
                         self.overlay_editor.show_cross_dissolve_controls(ui, language);
+                        self.overlay_editor.show_particle_controls(ui, language);
                         self.overlay_editor.show_transaction_controls(ui, language);
                     }
                 });
@@ -1484,6 +1485,10 @@ impl AirCardApp {
                 .min_size(egui::vec2(ui.available_width(), 40.0));
 
                 let resp = ui.add_enabled(can_flash, flash_btn);
+                #[cfg(test)]
+                if self.overlay_enabled && std::env::var_os("AIRCARD_EFFECTS_QA_SCROLL_EFFECTS").is_some() {
+                    ui.scroll_to_rect(resp.rect, Some(egui::Align::BOTTOM));
+                }
                 if resp.clicked() {
                     self.apply_card_skin(ctx);
                 }
@@ -2125,6 +2130,9 @@ mod tests {
             options,
             Box::new(move |cc| {
                 let mut app = AirCardApp::new(cc);
+                if std::env::var("AIRCARD_EFFECTS_QA_LANGUAGE").as_deref() == Ok("zh") {
+                    app.language = Language::SimplifiedChinese;
+                }
                 app.current_tab = AppTab::Wallet;
                 app.overlay_enabled = true;
                 let background = std::env::var_os("AIRCARD_EFFECTS_QA_BACKGROUND").map(PathBuf::from).unwrap_or_else(|| directory.join("qa-background.png"));
@@ -2142,6 +2150,9 @@ mod tests {
                 let alternate = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").map(PathBuf::from);
                 app.overlay_editor.set_cross_dissolve(alternate.is_some());
                 if let Some(path) = alternate { app.overlay_editor.set_alternate_background(path); }
+                let particle = std::env::var_os("AIRCARD_EFFECTS_QA_SPRITE").map(PathBuf::from);
+                app.overlay_editor.set_particles(particle.is_some());
+                if let Some(path) = particle { app.overlay_editor.set_particle_sprite(path); }
                 app.overlay_editor.set_transaction(std::env::var_os("AIRCARD_EFFECTS_QA_TRANSACTION").is_some());
                 if std::env::var_os("AIRCARD_EFFECTS_QA_TRANSACTION").is_some() {
                     let sprite = directory.join("qa-transaction.png");

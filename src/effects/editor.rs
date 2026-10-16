@@ -36,6 +36,8 @@ struct Draft {
     transaction: bool,
     transaction_sprite: Option<PathBuf>,
     transaction_shape: Option<PathBuf>,
+    neutral_particles_enabled: bool,
+    particle_sprite: Option<PathBuf>,
 }
 
 impl Draft {
@@ -46,7 +48,13 @@ impl Draft {
             dynamic_layer_configuration: DynamicConfiguration {
                 version: 2,
                 parallax_enabled: true,
-                neutral_emitter: None,
+                neutral_emitter: self.neutral_particles_enabled.then_some(
+                    artwork::EmitterConfiguration {
+                        style: artwork::EmitterStyle::Twinkling,
+                        density: artwork::EmitterDensity::Low,
+                        physics_effect: artwork::EmitterPhysics::Off,
+                    },
+                ),
                 cross_dissolve: self.cross_dissolve.then(Default::default),
                 transaction_effect: self.transaction.then(Default::default),
             },
@@ -58,7 +66,15 @@ impl Draft {
                 .foreground
                 .clone()
                 .context("Choose a transparent overlay PNG")?,
-            emitter_sprite: None,
+            emitter_sprite: if self.neutral_particles_enabled {
+                Some(
+                    self.particle_sprite
+                        .clone()
+                        .context("Choose a transparent particle PNG")?,
+                )
+            } else {
+                None
+            },
             transaction_sprite: if self.transaction {
                 Some(
                     self.transaction_sprite
@@ -109,6 +125,7 @@ pub(crate) struct OverlayEditor {
     preview_texture: Option<egui::TextureHandle>,
     alternate_texture: Option<egui::TextureHandle>,
     transaction_texture: Option<egui::TextureHandle>,
+    particle_texture: Option<egui::TextureHandle>,
     transaction_outline: Option<super::transaction::Shape>,
     show_alternate: bool,
     dirty: bool,
@@ -138,6 +155,7 @@ impl Default for OverlayEditor {
             preview_texture: None,
             alternate_texture: None,
             transaction_texture: None,
+            particle_texture: None,
             transaction_outline: None,
             show_alternate: false,
             dirty: true,
@@ -286,6 +304,16 @@ impl OverlayEditor {
     }
 
     fn install(&mut self, ctx: &egui::Context, preview: EffectsPreview) {
+        self.particle_texture = preview.sprite.as_ref().map(|image| {
+            ctx.load_texture(
+                "wallet-neutral-particle",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
         self.transaction_texture = preview.transaction_sprite.as_ref().map(|image| {
             ctx.load_texture(
                 "wallet-transaction-sprite",
@@ -349,6 +377,7 @@ impl OverlayEditor {
         self.preview_texture = None;
         self.alternate_texture = None;
         self.transaction_texture = None;
+        self.particle_texture = None;
         self.transaction_outline = None;
         self.error = None;
         self.status = None;
@@ -452,6 +481,60 @@ impl OverlayEditor {
         ui.small(
             language.text("Preview shows artwork only; the static fallback uses the base artwork."),
         );
+    }
+
+    pub(crate) fn set_particles(&mut self, enabled: bool) {
+        self.draft.neutral_particles_enabled = enabled;
+        self.invalidate_preview();
+    }
+
+    pub(crate) fn set_particle_sprite(&mut self, path: PathBuf) {
+        self.draft.particle_sprite = Some(path);
+        self.invalidate_preview();
+    }
+
+    pub fn show_particle_controls(&mut self, ui: &mut egui::Ui, language: Language) {
+        let mut enabled = self.draft.neutral_particles_enabled;
+        let mut changed = ui
+            .checkbox(&mut enabled, language.text("Particles (experimental)"))
+            .changed();
+        if changed {
+            self.set_particles(enabled);
+        }
+        if enabled {
+            if device::experimental_particles_enabled() {
+                ui.colored_label(ui.visuals().warn_fg_color, language.text("Experimental trial: particle originals may be unknown. Restore may leave the three neutral emitter PNGs behind."));
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(language.text("Choose Particle PNG...")).clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Transparent PNG", &["png"])
+                        .pick_file()
+                {
+                    self.set_particle_sprite(path);
+                    changed = true;
+                }
+                if let Some(path) = &self.draft.particle_sprite {
+                    ui.add(
+                        egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy())
+                            .truncate(),
+                    )
+                    .on_hover_text(path.display().to_string());
+                }
+                if let Some(texture) = &self.particle_texture {
+                    ui.add(egui::Image::new(texture).fit_to_exact_size(
+                        egui::vec2(28.0, 28.0)
+                            * (texture.size_vec2() / texture.size_vec2().max_elem()),
+                    ));
+                }
+            });
+            ui.small(
+                language.text("Native twinkling at low density, physics off. Preview is static."),
+            );
+        }
+        if changed && let Err(error) = self.remember() {
+            self.error = Some(format!("Could not save overlay settings: {error:#}"));
+        }
     }
 
     pub(crate) fn set_transaction(&mut self, enabled: bool) {
@@ -852,6 +935,41 @@ mod tests {
         let config = editor.draft.configuration().unwrap();
         assert!(config.transaction_shape.is_none() && config.transaction_sprite.is_none());
         assert_eq!(editor.draft.transaction_shape, Some(transaction_shape));
+        editor.set_cross_dissolve(true);
+        editor.set_particles(true);
+        assert!(!editor.ready());
+        assert!(editor.draft.configuration().is_err());
+        editor.set_particle_sprite(editor.overlay_path().unwrap().to_path_buf());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.ready(), "{:?}", editor.error);
+        assert!(editor.particle_texture.is_some());
+        let saved: Draft =
+            serde_json::from_slice(&serde_json::to_vec(&editor.draft).unwrap()).unwrap();
+        assert!(saved.neutral_particles_enabled && saved.cross_dissolve);
+        editor.set_particle_sprite(directory.join("missing-particle.png"));
+        assert!(!editor.ready() && editor.particle_texture.is_none());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!editor.ready() && editor.error.is_some());
+        editor.set_particles(false);
+        assert!(editor.draft.particle_sprite.is_some());
+        assert!(
+            editor
+                .draft
+                .configuration()
+                .unwrap()
+                .emitter_sprite
+                .is_none()
+        );
         editor.sync_background(Some(directory.join("replacement.jpg")), [0.25, 0.5]);
         assert!(
             !editor.ready(),

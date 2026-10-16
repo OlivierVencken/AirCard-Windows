@@ -124,19 +124,19 @@ pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<
     );
     let dynamic = serde_json::to_value(config)?;
     if let Some(existing) = object.get("dynamicLayerConfiguration") {
-        let parallax_only = serde_json::json!({"version":2,"parallaxEnabled":true});
-        let mut without_transaction = dynamic.clone();
-        without_transaction
-            .as_object_mut()
-            .unwrap()
-            .remove("transactionEffect");
-        if config.neutral_emitter.is_none()
-            && ((existing == &parallax_only
-                && (config.cross_dissolve.is_some() || config.transaction_effect.is_some()))
-                || (config.transaction_effect.is_some() && existing == &without_transaction))
+        // Only add typed effect members to an exact supported subset. Preserve
+        // every existing value; unknown members, removals and preset changes fail.
+        if existing != &dynamic
+            && existing.get("version") == Some(&serde_json::json!(2))
+            && existing.get("parallaxEnabled") == Some(&serde_json::json!(true))
+            && existing.as_object().is_some_and(|members| {
+                members
+                    .iter()
+                    .all(|(key, value)| dynamic.get(key) == Some(value))
+            })
         {
             let mut changes = Vec::new();
-            for key in ["crossDissolve", "transactionEffect"] {
+            for key in ["crossDissolve", "transactionEffect", "neutralEmitter"] {
                 if existing.get(key).is_none()
                     && let Some(value) = dynamic.get(key)
                 {
@@ -176,7 +176,69 @@ pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<
 
 #[cfg(test)]
 mod tests {
+    use super::super::artwork::{
+        EmitterConfiguration, EmitterDensity, EmitterPhysics, EmitterStyle,
+    };
     use super::*;
+
+    #[test]
+    fn particles_add_without_removing_cross_dissolve_or_transaction_members() {
+        for cross in [false, true] {
+            for transaction in [false, true] {
+                let config = DynamicConfiguration {
+                    version: 2,
+                    parallax_enabled: true,
+                    cross_dissolve: cross.then(Default::default),
+                    transaction_effect: transaction.then(Default::default),
+                    neutral_emitter: Some(EmitterConfiguration {
+                        style: EmitterStyle::Twinkling,
+                        density: EmitterDensity::Low,
+                        physics_effect: EmitterPhysics::Off,
+                    }),
+                };
+                let mut base = serde_json::to_value(&config).unwrap();
+                base.as_object_mut().unwrap().remove("neutralEmitter");
+                let original = serde_json::json!({"serialNumber":"preserved", "opaque":[null,1,"a"], "dynamicLayerConfiguration":base});
+                let (bytes, diff) =
+                    candidate(&serde_json::to_vec(&original).unwrap(), &config).unwrap();
+                let mut expected = original.clone();
+                expected["dynamicLayerConfiguration"]["neutralEmitter"] =
+                    serde_json::to_value(&config).unwrap()["neutralEmitter"].clone();
+                assert_eq!(parse_unique(&bytes).unwrap(), expected);
+                assert_eq!(
+                    parse_unique(&diff).unwrap()["changes"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    parse_unique(&diff).unwrap()["changes"][0]["path"],
+                    "/dynamicLayerConfiguration/neutralEmitter"
+                );
+                assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
+                let mut disabled = config.clone();
+                disabled.neutral_emitter = None;
+                assert!(candidate(&bytes, &disabled).is_err());
+                let mut unknown = original.clone();
+                unknown["dynamicLayerConfiguration"]["unknown"] = true.into();
+                assert!(candidate(&serde_json::to_vec(&unknown).unwrap(), &config).is_err());
+                let mut changed = expected.clone();
+                changed["dynamicLayerConfiguration"]["neutralEmitter"]["style"] = "falling".into();
+                assert!(candidate(&serde_json::to_vec(&changed).unwrap(), &config).is_err());
+                if cross {
+                    let mut disabled = config.clone();
+                    disabled.cross_dissolve = None;
+                    assert!(candidate(&bytes, &disabled).is_err());
+                }
+                if transaction {
+                    let mut disabled = config.clone();
+                    disabled.transaction_effect = None;
+                    assert!(candidate(&bytes, &disabled).is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn transaction_adds_only_to_exact_supported_layers_and_preserves_repeats() {

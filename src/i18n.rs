@@ -55,6 +55,11 @@ impl Language {
         }
 
         match source {
+            "Particles (experimental)" => "粒子（实验性）",
+            "Choose Particle PNG..." => "选择粒子 PNG...",
+            "Choose a transparent particle PNG" => "请选择透明粒子 PNG",
+            "Experimental trial: particle originals may be unknown. Restore may leave the three neutral emitter PNGs behind." => "实验性试用：粒子原件可能未知。恢复后可能仍保留三个中性发射器 PNG 文件。",
+            "Native twinkling at low density, physics off. Preview is static." => "原生低密度闪烁，关闭物理效果。预览为静态。",
             "Transaction effect (experimental)" => "交易效果（实验性）",
             "Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind." => "实验性试用：交易效果原件可能未知。恢复后可能仍保留三个发射器 PNG 和轮廓 SVG 文件。",
             "An expanding particle outline during payment results. Phone playback is not yet validated." => {

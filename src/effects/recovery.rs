@@ -147,10 +147,60 @@ pub(super) enum JournalKind {
     MetadataTransaction,
     MetadataCrossDissolveTransactionCapture,
     MetadataCrossDissolveTransaction,
+    MetadataParticleCapture,
+    MetadataParticles,
+    MetadataCrossDissolveParticleCapture,
+    MetadataCrossDissolveParticles,
+    MetadataTransactionParticleCapture,
+    MetadataTransactionParticles,
+    MetadataCrossDissolveTransactionParticleCapture,
+    MetadataCrossDissolveTransactionParticles,
     FrontFaceCache,
 }
 
 impl JournalKind {
+    pub(super) fn particles(self) -> bool {
+        self.without_particles() != self
+    }
+
+    pub(super) fn without_particles(self) -> Self {
+        match self {
+            Self::MetadataParticleCapture => Self::MetadataCapture,
+            Self::MetadataParticles => Self::MetadataParallax,
+            Self::MetadataCrossDissolveParticleCapture => Self::MetadataCrossDissolveCapture,
+            Self::MetadataCrossDissolveParticles => Self::MetadataCrossDissolve,
+            Self::MetadataTransactionParticleCapture => Self::MetadataTransactionCapture,
+            Self::MetadataTransactionParticles => Self::MetadataTransaction,
+            Self::MetadataCrossDissolveTransactionParticleCapture => {
+                Self::MetadataCrossDissolveTransactionCapture
+            }
+            Self::MetadataCrossDissolveTransactionParticles => {
+                Self::MetadataCrossDissolveTransaction
+            }
+            other => other,
+        }
+    }
+
+    pub(super) fn with_particles(self, enabled: bool) -> Self {
+        if !enabled {
+            return self;
+        }
+        match self {
+            Self::MetadataCapture => Self::MetadataParticleCapture,
+            Self::MetadataParallax => Self::MetadataParticles,
+            Self::MetadataCrossDissolveCapture => Self::MetadataCrossDissolveParticleCapture,
+            Self::MetadataCrossDissolve => Self::MetadataCrossDissolveParticles,
+            Self::MetadataTransactionCapture => Self::MetadataTransactionParticleCapture,
+            Self::MetadataTransaction => Self::MetadataTransactionParticles,
+            Self::MetadataCrossDissolveTransactionCapture => {
+                Self::MetadataCrossDissolveTransactionParticleCapture
+            }
+            Self::MetadataCrossDissolveTransaction => {
+                Self::MetadataCrossDissolveTransactionParticles
+            }
+            other => other,
+        }
+    }
     pub(super) fn bundle_extension(self) -> &'static str {
         match self {
             Self::FrontFaceCache => ".cache",
@@ -159,7 +209,7 @@ impl JournalKind {
     }
     pub(super) fn is_installation(self) -> bool {
         matches!(
-            self,
+            self.without_particles(),
             Self::MetadataParallax
                 | Self::MetadataCrossDissolve
                 | Self::MetadataTransaction
@@ -168,7 +218,7 @@ impl JournalKind {
     }
     pub(super) fn transaction(self) -> bool {
         matches!(
-            self,
+            self.without_particles(),
             Self::MetadataTransactionCapture
                 | Self::MetadataTransaction
                 | Self::MetadataCrossDissolveTransactionCapture
@@ -177,7 +227,7 @@ impl JournalKind {
     }
     pub(super) fn cross_dissolve(self) -> bool {
         matches!(
-            self,
+            self.without_particles(),
             Self::MetadataCrossDissolveCapture
                 | Self::MetadataCrossDissolve
                 | Self::MetadataCrossDissolveTransactionCapture
@@ -199,7 +249,7 @@ impl JournalKind {
     pub(super) fn has_metadata(self) -> bool {
         self.transaction()
             || matches!(
-                self,
+                self.without_particles(),
                 Self::MetadataCapture
                     | Self::MetadataParallax
                     | Self::MetadataCrossDissolveCapture
@@ -210,6 +260,22 @@ impl JournalKind {
 
 pub(super) fn inventory(kind: &JournalKind) -> Vec<String> {
     match kind {
+        JournalKind::MetadataParticleCapture
+        | JournalKind::MetadataParticles
+        | JournalKind::MetadataCrossDissolveParticleCapture
+        | JournalKind::MetadataCrossDissolveParticles
+        | JournalKind::MetadataTransactionParticleCapture
+        | JournalKind::MetadataTransactionParticles
+        | JournalKind::MetadataCrossDissolveTransactionParticleCapture
+        | JournalKind::MetadataCrossDissolveTransactionParticles => {
+            // Append to the exact prior inventory; never reinterpret historical indices.
+            let mut names = inventory(&kind.without_particles());
+            names.extend(
+                [".png", "@2x.png", "@3x.png", ".pdf", "@2x.pdf", "@3x.pdf"]
+                    .map(|suffix| format!("neutralEmitter{suffix}")),
+            );
+            names
+        }
         JournalKind::MetadataTransactionCapture
         | JournalKind::MetadataTransaction
         | JournalKind::MetadataCrossDissolveTransactionCapture
@@ -302,19 +368,28 @@ pub(super) struct Journal {
     // Narrow transaction trial policy, independent of the alternate-background exception.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) allow_missing_transaction_originals: bool,
+    // Independent opt-in, restricted to the three neutral emitter PNGs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) allow_missing_particle_originals: bool,
 }
 
 impl Journal {
     pub(super) fn allows_missing_original(&self, asset: &Asset) -> bool {
-        (self.allow_missing_transaction_originals
-            && self.kind.transaction()
+        (self.allow_missing_particle_originals
+            && self.kind.particles()
             && matches!(
                 asset.leaf.as_str(),
-                "transactionEffectEmitter.png"
-                    | "transactionEffectEmitter@2x.png"
-                    | "transactionEffectEmitter@3x.png"
-                    | "transactionEffectShape.svg"
+                "neutralEmitter.png" | "neutralEmitter@2x.png" | "neutralEmitter@3x.png"
             ))
+            || (self.allow_missing_transaction_originals
+                && self.kind.transaction()
+                && matches!(
+                    asset.leaf.as_str(),
+                    "transactionEffectEmitter.png"
+                        | "transactionEffectEmitter@2x.png"
+                        | "transactionEffectEmitter@3x.png"
+                        | "transactionEffectShape.svg"
+                ))
             || (self.allow_missing_cross_dissolve_originals
                 && matches!(
                     self.kind,
@@ -365,6 +440,10 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
         "Journal checksum mismatch"
     );
     let journal: Journal = serde_json::from_slice(bytes)?;
+    ensure!(
+        !journal.allow_missing_particle_originals || journal.kind.particles(),
+        "Particle backup exception is invalid for this recovery kind"
+    );
     ensure!(
         !journal.allow_missing_transaction_originals || journal.kind.transaction(),
         "Transaction backup exception is invalid for this recovery kind"
@@ -514,9 +593,6 @@ mod tests {
         );
         let journal = load(&path).expect("Existing journal must remain compatible");
         journal.binding.validate().unwrap();
-        assert!(matches!(
-            journal.kind,
-            JournalKind::MetadataCapture | JournalKind::MetadataParallax
-        ));
+        assert!(journal.kind.has_metadata());
     }
 }

@@ -27,6 +27,10 @@ pub(crate) fn experimental_transaction_enabled() -> bool {
     std::env::var("AIRCARD_EXPERIMENTAL_TRANSACTION_NO_ASSET_BACKUP").as_deref() == Ok("1")
 }
 
+pub(crate) fn experimental_particles_enabled() -> bool {
+    std::env::var("AIRCARD_EXPERIMENTAL_PARTICLES_NO_EMITTER_BACKUP").as_deref() == Ok("1")
+}
+
 fn random_token() -> Result<String> {
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -613,7 +617,7 @@ fn require_original_bytes(asset: &Asset, bytes: &[u8]) -> Result<()> {
 fn capture_metadata_for_binding(dir: &Path, binding: Binding, kind: JournalKind) -> Result<()> {
     ensure!(
         matches!(
-            kind,
+            kind.without_particles(),
             JournalKind::MetadataCapture
                 | JournalKind::MetadataCrossDissolveCapture
                 | JournalKind::MetadataTransactionCapture
@@ -652,6 +656,7 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding, kind: JournalKind)
         protected_readback_verified: false,
         allow_missing_cross_dissolve_originals: false,
         allow_missing_transaction_originals: false,
+        allow_missing_particle_originals: false,
     };
     save(dir, &journal)?;
     capture_and_return(dir, &mut journal, &mut afc, &session, &[0, 1, 2])?;
@@ -894,7 +899,7 @@ fn verify_candidate_export(
 
 fn installation_ready(journal: &Journal) -> bool {
     journal.roots.is_empty()
-        && match journal.kind {
+        && match journal.kind.without_particles() {
             JournalKind::MetadataCapture
             | JournalKind::MetadataCrossDissolveCapture
             | JournalKind::MetadataTransactionCapture
@@ -930,17 +935,14 @@ fn plan_overlay_installation(
     let cross_dissolve = journal.kind.cross_dissolve();
     ensure!(
         cross_dissolve == deployment.contains_cross_dissolve
-            && journal.kind.transaction() == deployment.contains_transaction,
+            && journal.kind.transaction() == deployment.contains_transaction
+            && journal.kind.particles() == deployment.contains_emitter,
         "Pack does not match captured effect inventory"
     );
     ensure!(
         !journal.kind.is_installation()
             || journal.trial_pack_sha256.as_ref() == Some(&deployment.manifest_sha256),
         "A repeated installation must use the identical verified pack"
-    );
-    ensure!(
-        !deployment.contains_emitter,
-        "Particle installation is not supported in this build"
     );
     ensure!(
         deployment.original_metadata == original
@@ -972,6 +974,7 @@ fn plan_overlay_installation(
     ensure!(
         planned.len()
             == 10
+                + if deployment.contains_emitter { 3 } else { 0 }
                 + if cross_dissolve { 3 } else { 0 }
                 + if deployment.contains_transaction {
                     4
@@ -989,19 +992,25 @@ fn record_trial_policy(
     deployment: &artwork::PreparedDeployment,
     cross_opt_in: bool,
     transaction_opt_in: bool,
+    particle_opt_in: bool,
 ) -> Result<()> {
     ensure!(
         journal.kind.transaction() == deployment.contains_transaction
-            && journal.kind.cross_dissolve() == deployment.contains_cross_dissolve,
+            && journal.kind.cross_dissolve() == deployment.contains_cross_dissolve
+            && journal.kind.particles() == deployment.contains_emitter,
         "Pack does not match captured effect inventory"
     );
-    if deployment.contains_transaction && transaction_opt_in {
-        journal.allow_missing_transaction_originals = true;
-        // Persist the policy before installation preflight or a new native session.
-        save(dir, journal)?;
-    } else if deployment.contains_cross_dissolve && !deployment.contains_transaction && cross_opt_in
-    {
-        journal.allow_missing_cross_dissolve_originals = true;
+    let particles = deployment.contains_emitter && particle_opt_in;
+    let transaction = deployment.contains_transaction && transaction_opt_in;
+    let cross_dissolve = deployment.contains_cross_dissolve
+        && !deployment.contains_transaction
+        && !deployment.contains_emitter
+        && cross_opt_in;
+    if particles || transaction || cross_dissolve {
+        journal.allow_missing_particle_originals |= particles;
+        journal.allow_missing_transaction_originals |= transaction;
+        journal.allow_missing_cross_dissolve_originals |= cross_dissolve;
+        // Persist all selected policies before installation preflight or a native session.
         save(dir, journal)?;
     }
     Ok(())
@@ -1020,6 +1029,7 @@ fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result
         &deployment,
         experimental_cross_dissolve_enabled(),
         experimental_transaction_enabled(),
+        experimental_particles_enabled(),
     )?;
     let original = regular_read(
         &dir.join("original-pass.json"),
@@ -1047,7 +1057,8 @@ fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result
         deployment.contains_cross_dissolve,
         deployment.contains_transaction,
         true,
-    );
+    )
+    .with_particles(deployment.contains_emitter);
     journal.trial_pack_sha256 = Some(deployment.manifest_sha256);
     journal.status = "ParallaxInstallIntent".into();
     save(dir, &journal)?;
@@ -1094,10 +1105,6 @@ pub(crate) fn apply(
         binding.transport == DeviceTransport::Usb,
         "Effects currently require USB"
     );
-    ensure!(
-        config.dynamic_layer_configuration.neutral_emitter.is_none(),
-        "UI supports parallax only"
-    );
     let capture = directory.join("recovery");
     progress("Preparing selected images…");
     // Freeze artwork before device work using the same processing as preview
@@ -1105,6 +1112,9 @@ pub(crate) fn apply(
     let (frozen_artwork, frozen_layers) = artwork::prepare_artwork(&config, Path::new("."))?;
     config.background = frozen_artwork.join("backgroundParallax.png");
     config.foreground = frozen_artwork.join("foregroundParallax.png");
+    if config.emitter_sprite.is_some() {
+        config.emitter_sprite = Some(frozen_artwork.join("neutralEmitter.png"));
+    }
     if config.alternate_background.is_some() {
         config.alternate_background =
             Some(frozen_artwork.join("backgroundParallaxCrossDissolve.png"));
@@ -1127,7 +1137,8 @@ pub(crate) fn apply(
                 .transaction_effect
                 .is_some(),
             false,
-        );
+        )
+        .with_particles(config.dynamic_layer_configuration.neutral_emitter.is_some());
         capture_metadata_for_binding(&capture, binding, kind)?;
         needs_recovery = false;
         progress("Preparing overlay skin…");
@@ -1187,6 +1198,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn particle_trial_preserves_other_effects_and_has_narrow_durable_recovery() {
+        for cross in [false, true] {
+            for transaction in [false, true] {
+                let base = JournalKind::for_effects(cross, transaction, false);
+                let mut journal = recovery_capture_fixture();
+                journal.kind = base.with_particles(true);
+                let names = inventory(&journal.kind);
+                assert_eq!(&names[..inventory(&base).len()], inventory(&base));
+                assert_eq!(
+                    names.len(),
+                    28 + if cross { 6 } else { 0 } + if transaction { 7 } else { 0 }
+                );
+                journal.assets = names
+                    .into_iter()
+                    .map(|leaf| Asset {
+                        original_sha256: (!(leaf.starts_with("neutralEmitter")
+                            || leaf.ends_with(".pdf"))
+                            || leaf.starts_with("cardBackgroundCombined"))
+                        .then(|| sha256(b"original")),
+                        candidate_sha256: sha256(b"candidate"),
+                        leaf,
+                    })
+                    .collect();
+                let deployment = artwork::PreparedDeployment {
+                    manifest_sha256: sha256(b"particle-pack"),
+                    original_metadata: b"original".to_vec(),
+                    candidate_metadata: b"candidate".to_vec(),
+                    contains_emitter: true,
+                    contains_cross_dissolve: cross,
+                    contains_transaction: transaction,
+                    resources: [
+                        "backgroundParallax.png",
+                        "foregroundParallax.png",
+                        "dynamicLayerStaticFallback.png",
+                        "backgroundParallaxCrossDissolve.png",
+                        "transactionEffectEmitter.png",
+                        "transactionEffectShape.svg",
+                        "neutralEmitter.png",
+                    ]
+                    .into_iter()
+                    .map(|name| artwork::PreparedResource {
+                        filename: name.into(),
+                        bytes: name.as_bytes().to_vec(),
+                    })
+                    .collect(),
+                };
+                let dir = std::env::temp_dir()
+                    .join(format!("particle-trial-{}", random_token().unwrap()));
+                fs::create_dir(&dir).unwrap();
+                // Normal launches accept particles when every emitter preimage is known.
+                for asset in &mut journal.assets {
+                    if asset.leaf.starts_with("neutralEmitter") && asset.leaf.ends_with(".png") {
+                        asset.original_sha256 = Some(sha256(b"original"));
+                    }
+                }
+                assert!(plan_overlay_installation(&journal, &deployment, b"original").is_ok());
+                for asset in &mut journal.assets {
+                    if asset.leaf.starts_with("neutralEmitter") && asset.leaf.ends_with(".png") {
+                        asset.original_sha256 = None;
+                    }
+                }
+                assert!(
+                    serde_json::to_value(&journal)
+                        .unwrap()
+                        .get("allow_missing_particle_originals")
+                        .is_none()
+                );
+                // Other trial opt-ins cannot waive particle or combined alternate originals.
+                record_trial_policy(&dir, &mut journal, &deployment, true, false, false).unwrap();
+                assert!(!journal.allow_missing_cross_dissolve_originals);
+                assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+                record_trial_policy(&dir, &mut journal, &deployment, false, false, true).unwrap();
+                let mut journal = load(&dir).unwrap();
+                assert!(journal.allow_missing_particle_originals);
+                assert!(!journal.allow_missing_transaction_originals);
+                let plan = plan_overlay_installation(&journal, &deployment, b"original").unwrap();
+                assert_eq!(
+                    plan.len(),
+                    13 + if cross { 3 } else { 0 } + if transaction { 4 } else { 0 }
+                );
+                for index in 3..journal.assets.len() {
+                    let asset = &journal.assets[index];
+                    if asset.leaf.ends_with(".pdf") {
+                        assert!(!journal.allows_missing_original(asset));
+                        journal.assets[index].original_sha256 = Some(sha256(b"pdf"));
+                        assert!(
+                            plan_overlay_installation(&journal, &deployment, b"original").is_err()
+                        );
+                        journal.assets[index].original_sha256 = None;
+                    } else if !asset.leaf.starts_with("neutralEmitter") {
+                        let original = journal.assets[index].original_sha256.take();
+                        assert!(
+                            plan_overlay_installation(&journal, &deployment, b"original").is_err()
+                        );
+                        journal.assets[index].original_sha256 = original;
+                    }
+                }
+                let before = fs::read(dir.join("journal.json")).unwrap();
+                journal.kind = base;
+                assert!(
+                    record_trial_policy(&dir, &mut journal, &deployment, false, false, true)
+                        .is_err()
+                );
+                assert_eq!(fs::read(dir.join("journal.json")).unwrap(), before);
+                save(&dir, &journal).unwrap();
+                assert!(
+                    load(&dir).is_err(),
+                    "Policy cannot be attached to an old inventory"
+                );
+                journal.kind =
+                    JournalKind::for_effects(cross, transaction, true).with_particles(true);
+                journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
+                for (index, bytes) in &plan {
+                    journal.assets[*index].candidate_sha256 = sha256(bytes);
+                }
+                save(&dir, &journal).unwrap();
+                let mut journal = load(&dir).unwrap();
+                assert!(journal.incomplete_recovery());
+                for (index, bytes) in &plan {
+                    if !journal.assets[*index].leaf.starts_with("neutralEmitter") {
+                        continue;
+                    }
+                    retain_held_bytes(&dir, &mut journal, *index, bytes).unwrap();
+                    assert!(journal.assets[*index].original_sha256.is_none());
+                    assert!(!dir.join(format!("original-{index}.bin")).exists());
+                    assert!(
+                        retain_held_bytes(&dir, &mut journal, *index, b"conflicting file").is_err()
+                    );
+                }
+                journal.status =
+                    "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation".into();
+                save(&dir, &journal).unwrap();
+                assert!(
+                    load(&dir).unwrap().incomplete_recovery(),
+                    "Restore must retain its limit after restart"
+                );
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn transaction_trial_is_durable_narrow_and_keeps_unknown_originals_unknown() {
         for cross in [false, true] {
             let mut journal = recovery_capture_fixture();
@@ -1236,13 +1389,13 @@ mod tests {
                     .unwrap()
                     .contains_key("allow_missing_transaction_originals")
             );
-            record_trial_policy(&dir, &mut journal, &deployment, true, false).unwrap();
+            record_trial_policy(&dir, &mut journal, &deployment, true, false, false).unwrap();
             assert!(
                 !journal.allow_missing_transaction_originals
                     && !journal.allow_missing_cross_dissolve_originals
             );
             assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
-            record_trial_policy(&dir, &mut journal, &deployment, true, true).unwrap();
+            record_trial_policy(&dir, &mut journal, &deployment, true, true, false).unwrap();
             let mut journal = load(&dir).unwrap(); // Policy survives reopening without an environment variable.
             assert!(
                 journal.allow_missing_transaction_originals
@@ -1271,7 +1424,9 @@ mod tests {
             // Wrong journal kinds cannot acquire a policy that would make recovery unreadable.
             let before = fs::read(dir.join("journal.json")).unwrap();
             journal.kind = JournalKind::MetadataCapture;
-            assert!(record_trial_policy(&dir, &mut journal, &deployment, false, true).is_err());
+            assert!(
+                record_trial_policy(&dir, &mut journal, &deployment, false, true, false).is_err()
+            );
             assert_eq!(fs::read(dir.join("journal.json")).unwrap(), before);
             journal.kind = JournalKind::for_effects(cross, true, true);
             journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
@@ -1475,6 +1630,7 @@ mod tests {
                 protected_readback_verified: false,
                 allow_missing_cross_dissolve_originals: false,
                 allow_missing_transaction_originals: false,
+                allow_missing_particle_originals: false,
             };
             save(&capture, &journal)?;
             let operation = (|| -> Result<Vec<usize>> {
