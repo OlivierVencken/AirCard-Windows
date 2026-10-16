@@ -36,6 +36,21 @@ pub struct DynamicConfiguration {
     pub neutral_emitter: Option<EmitterConfiguration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cross_dissolve: Option<CrossDissolveConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_effect: Option<TransactionConfiguration>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionConfiguration {
+    pub style: TransactionStyle,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransactionStyle {
+    #[default]
+    ZoomedShape,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +166,10 @@ pub struct PrepareConfig {
     pub emitter_sprite: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternate_background: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_sprite: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_shape: Option<PathBuf>,
     pub original_pass_json: PathBuf,
     pub output_directory: PathBuf,
     #[serde(default)]
@@ -166,6 +185,15 @@ impl PrepareConfig {
             "Unsupported authoring schema version"
         );
         self.dynamic_layer_configuration.validate()?;
+        let transaction = self
+            .dynamic_layer_configuration
+            .transaction_effect
+            .is_some();
+        ensure!(
+            transaction == self.transaction_sprite.is_some()
+                && transaction == self.transaction_shape.is_some(),
+            "Choose a transaction particle PNG and shape SVG"
+        );
         ensure!(
             self.alternate_background.is_some()
                 == self.dynamic_layer_configuration.cross_dissolve.is_some(),
@@ -551,6 +579,8 @@ pub struct EffectsPreview {
     pub fallback: RgbaImage,
     pub sprite: Option<RgbaImage>,
     pub alternate_background: Option<RgbaImage>,
+    pub transaction_sprite: Option<RgbaImage>,
+    pub transaction_shape: Option<Vec<u8>>,
 }
 
 impl EffectsPreview {
@@ -668,6 +698,25 @@ fn preview_internal(
             fallback,
             sprite,
             alternate_background,
+            transaction_sprite: config
+                .transaction_sprite
+                .as_ref()
+                .map(|path| {
+                    prepare_sprite(decode_png(&read_bounded(
+                        &base.join(path),
+                        MAX_IMAGE_BYTES,
+                    )?)?)
+                })
+                .transpose()?,
+            transaction_shape: config
+                .transaction_shape
+                .as_ref()
+                .map(|path| -> Result<_> {
+                    let bytes = read_bounded(&base.join(path), super::transaction::MAX_SVG_BYTES)?;
+                    super::transaction::validate(&bytes)?;
+                    Ok(bytes)
+                })
+                .transpose()?,
         },
         issue,
     })
@@ -692,6 +741,8 @@ pub fn prepare_configuration_from_preview(
         fallback,
         sprite,
         alternate_background,
+        transaction_sprite,
+        transaction_shape,
     } = frozen;
     let original = read_bounded(&base.join(&config.original_pass_json), MAX_JSON_BYTES)?;
     let (patched, diff) = candidate(&original, &config.dynamic_layer_configuration)?;
@@ -720,6 +771,17 @@ pub fn prepare_configuration_from_preview(
         names.push(("alternate_background", "backgroundParallaxCrossDissolve"));
         assets.push(encode_png(&alternate)?);
     }
+    if let Some(sprite) = transaction_sprite {
+        dimensions.push(sprite.dimensions());
+        names.push(("transaction_emitter", "transactionEffectEmitter"));
+        assets.push(encode_png(&sprite)?);
+    }
+    if let Some(bytes) = transaction_shape {
+        let shape = super::transaction::validate(&bytes)?;
+        dimensions.push((shape.width.ceil() as u32, shape.height.ceil() as u32));
+        names.push(("transaction_shape", "transactionEffectShape"));
+        assets.push(bytes);
+    }
     let metadata_bytes = [original, patched, diff];
     let output = base.join(&config.output_directory);
     let resources = names
@@ -729,14 +791,28 @@ pub fn prepare_configuration_from_preview(
         .map(|(((role, basename), bytes), (width, height))| Resource {
             role: (*role).into(),
             recovered_basename: (*basename).into(),
-            candidate_filenames: vec![
-                format!("{basename}.png"),
-                format!("{basename}@2x.png"),
-                format!("{basename}@3x.png"),
-            ],
+            candidate_filenames: if *role == "transaction_shape" {
+                vec![format!("{basename}.svg")]
+            } else {
+                vec![
+                    format!("{basename}.png"),
+                    format!("{basename}@2x.png"),
+                    format!("{basename}@3x.png"),
+                ]
+            },
             width,
             height,
-            file: FileRecord::new(&format!("{basename}.png"), bytes),
+            file: FileRecord::new(
+                &format!(
+                    "{basename}.{}",
+                    if *role == "transaction_shape" {
+                        "svg"
+                    } else {
+                        "png"
+                    }
+                ),
+                bytes,
+            ),
         })
         .collect();
     let metadata = METADATA_NAMES
@@ -796,6 +872,16 @@ pub fn preview_pack(directory: &Path) -> Result<EffectsPreview> {
         } else {
             None
         },
+        transaction_sprite: if pack.contains_transaction {
+            Some(find("transactionEffectEmitter.png")?)
+        } else {
+            None
+        },
+        transaction_shape: pack
+            .resources
+            .iter()
+            .find(|r| r.filename == "transactionEffectShape.svg")
+            .map(|r| r.bytes.clone()),
     })
 }
 
@@ -825,6 +911,9 @@ pub fn prepare_artwork(config: &PrepareConfig, base: &Path) -> Result<(PathBuf, 
     if let Some(alternate) = &preview.alternate_background {
         images.push(("backgroundParallaxCrossDissolve.png", alternate));
     }
+    if let Some(sprite) = &preview.transaction_sprite {
+        images.push(("transactionEffectEmitter.png", sprite));
+    }
     let mut records = Vec::new();
     let mut encoded = Vec::new();
     for (name, image) in images {
@@ -832,6 +921,14 @@ pub fn prepare_artwork(config: &PrepareConfig, base: &Path) -> Result<(PathBuf, 
         records.push(serde_json::json!({"filename":name, "width":image.width(),
             "height":image.height(), "byte_count":bytes.len(), "sha256":sha256(&bytes)}));
         encoded.push((name, bytes));
+    }
+    if let Some(bytes) = &preview.transaction_shape {
+        let shape = super::transaction::validate(bytes)?;
+        records.push(
+            serde_json::json!({"filename":"transactionEffectShape.svg", "width":shape.width,
+            "height":shape.height,"byte_count":bytes.len(),"sha256":sha256(bytes)}),
+        );
+        encoded.push(("transactionEffectShape.svg", bytes.clone()));
     }
     let manifest = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version":1, "kind":"artwork-only", "deployable":false,
@@ -892,6 +989,7 @@ pub struct PreparedDeployment {
     pub resources: Vec<PreparedResource>,
     pub contains_emitter: bool,
     pub contains_cross_dissolve: bool,
+    pub contains_transaction: bool,
 }
 
 pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
@@ -926,6 +1024,15 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
     if contains_cross_dissolve {
         names.push(("alternate_background", "backgroundParallaxCrossDissolve"));
     }
+    let contains_transaction = manifest
+        .configuration
+        .dynamic_layer_configuration
+        .transaction_effect
+        .is_some();
+    if contains_transaction {
+        names.push(("transaction_emitter", "transactionEffectEmitter"));
+        names.push(("transaction_shape", "transactionEffectShape"));
+    }
     ensure!(
         manifest.resources.len() == names.len() && manifest.metadata.len() == 3,
         "Incomplete resource/metadata inventory"
@@ -938,23 +1045,54 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
             resource.role == role && resource.recovered_basename == basename,
             "Invalid resource role/basename"
         );
-        let candidates = vec![
-            format!("{basename}.png"),
-            format!("{basename}@2x.png"),
-            format!("{basename}@3x.png"),
-        ];
+        let candidates = if role == "transaction_shape" {
+            vec![format!("{basename}.svg")]
+        } else {
+            vec![
+                format!("{basename}.png"),
+                format!("{basename}@2x.png"),
+                format!("{basename}@3x.png"),
+            ]
+        };
         ensure!(
             resource.candidate_filenames == candidates,
             "Unsupported filename candidates"
         );
-        let filename = format!("{basename}.png");
-        let bytes = verify_file(directory, &resource.file, &filename, MAX_IMAGE_BYTES)?;
+        let filename = format!(
+            "{basename}.{}",
+            if role == "transaction_shape" {
+                "svg"
+            } else {
+                "png"
+            }
+        );
+        let bytes = verify_file(
+            directory,
+            &resource.file,
+            &filename,
+            if role == "transaction_shape" {
+                super::transaction::MAX_SVG_BYTES
+            } else {
+                MAX_IMAGE_BYTES
+            },
+        )?;
+        if role == "transaction_shape" {
+            let shape = super::transaction::validate(&bytes)?;
+            ensure!(
+                (resource.width, resource.height)
+                    == (shape.width.ceil() as u32, shape.height.ceil() as u32),
+                "SVG canvas mismatch"
+            );
+            allowed.push(filename.clone());
+            resources.push(PreparedResource { filename, bytes });
+            continue;
+        }
         let decoded = decode_png(&bytes)?;
         ensure!(
             decoded.dimensions() == (resource.width, resource.height),
             "Resource dimension mismatch"
         );
-        if role == "emitter" {
+        if role == "emitter" || role == "transaction_emitter" {
             prepare_sprite(decoded)?;
         } else {
             let canvas = &manifest.configuration.canvas;
@@ -1037,6 +1175,7 @@ pub fn load_deployment(directory: &Path) -> Result<PreparedDeployment> {
         resources,
         contains_emitter,
         contains_cross_dissolve,
+        contains_transaction,
     })
 }
 
@@ -1059,6 +1198,62 @@ mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn transaction_freezes_svg_and_sprite_preserves_fallback_and_detects_tampering() {
+        for cross in [false, true] {
+            let fixture = Fixture::new();
+            fixture.prepare();
+            let mut config = config();
+            let base = preview(&config, &fixture.0).unwrap().fallback;
+            config.dynamic_layer_configuration.transaction_effect = Some(Default::default());
+            assert!(preview(&config, &fixture.0).is_err());
+            config.transaction_sprite = Some("foreground.png".into());
+            config.transaction_shape = Some("shape.svg".into());
+            let svg = br#"<svg width="100" height="100"><path d="M50 5L95 95L5 95Z"/></svg>"#;
+            fs::write(fixture.0.join("shape.svg"), svg).unwrap();
+            if cross {
+                config.dynamic_layer_configuration.cross_dissolve = Some(Default::default());
+                config.alternate_background = Some("background.png".into());
+            }
+            config.output_directory = "frozen".into();
+            let (frozen_dir, frozen) = prepare_artwork(&config, &fixture.0).unwrap();
+            assert_eq!(
+                fs::read(frozen_dir.join("transactionEffectShape.svg")).unwrap(),
+                svg
+            );
+            assert_eq!(frozen.fallback, base);
+            let sprite = frozen.transaction_sprite.clone();
+            fs::write(fixture.0.join("shape.svg"), b"changed after freeze").unwrap();
+            config.output_directory = "transaction-pack".into();
+            let pack = prepare_configuration_from_preview(&config, &fixture.0, frozen).unwrap();
+            let deployment = load_deployment(&pack).unwrap();
+            assert!(deployment.contains_transaction);
+            assert_eq!(deployment.resources.len(), if cross { 6 } else { 5 });
+            let loaded = preview_pack(&pack).unwrap();
+            assert_eq!(loaded.transaction_sprite, sprite);
+            assert_eq!(loaded.transaction_shape.as_deref(), Some(svg.as_slice()));
+            assert_eq!(loaded.fallback, base);
+            assert_eq!(
+                parse_unique(&deployment.candidate_metadata).unwrap()["dynamicLayerConfiguration"]
+                    ["transactionEffect"],
+                serde_json::json!({"style":"zoomedShape"})
+            );
+            let shape_path = pack.join("transactionEffectShape.svg");
+            fs::write(&shape_path, b"tampered").unwrap();
+            assert!(load_deployment(&pack).is_err());
+            // Rebinding hashes cannot make an invalid SVG acceptable.
+            update_manifest(&pack, |m| {
+                let record = m["resources"].as_array_mut().unwrap().last_mut().unwrap();
+                record["file"]["byte_count"] = 8.into();
+                record["file"]["sha256"] = sha256(b"tampered").into();
+            });
+            assert!(load_deployment(&pack).is_err());
+            let mut value = serde_json::to_value(&config).unwrap();
+            value["dynamic_layer_configuration"]["transactionEffect"]["style"] = "other".into();
+            assert!(serde_json::from_value::<PrepareConfig>(value).is_err());
+        }
+    }
 
     #[test]
     fn cross_dissolve_freezes_aligned_alternate_and_preserves_base_fallback() {
@@ -1228,11 +1423,14 @@ mod tests {
                 parallax_enabled: true,
                 neutral_emitter: None,
                 cross_dissolve: None,
+                transaction_effect: None,
             },
             background: "background.png".into(),
             foreground: "foreground.png".into(),
             emitter_sprite: None,
             alternate_background: None,
+            transaction_sprite: None,
+            transaction_shape: None,
             original_pass_json: "pass.json".into(),
             output_directory: "pack".into(),
             canvas: Canvas {

@@ -55,11 +55,56 @@ impl Language {
         }
 
         match source {
+            "Transaction effect (experimental)" => "交易效果（实验性）",
+            "Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind." => "实验性试用：交易效果原件可能未知。恢复后可能仍保留三个发射器 PNG 和轮廓 SVG 文件。",
+            "An expanding particle outline during payment results. Phone playback is not yet validated." => {
+                "付款结果显示时播放扩大的粒子轮廓。尚未在手机上验证播放效果。"
+            }
+            "Particle PNG..." => "粒子 PNG...",
+            "Shape SVG..." => "轮廓 SVG...",
+            "Choose a transaction particle PNG" => "请选择交易粒子 PNG",
+            "Choose a transaction shape SVG" => "请选择交易轮廓 SVG",
+            "Choose a transaction particle PNG and shape SVG" => "请选择交易粒子 PNG 和轮廓 SVG",
+            "SVG needs width and height, with one direct path and only a d attribute. Flatten transforms and groups before importing." => {
+                "SVG 需要宽度和高度，且只包含一个直属 path 元素和 d 属性。导入前请展平变换和分组。"
+            }
+            "Particle and outline preview only; payment animation runs on the phone." => {
+                "仅预览粒子和轮廓；付款动画在手机上运行。"
+            }
+            "Transaction SVG exceeds 256 KiB" => "交易 SVG 超过 256 KiB",
+            "Transaction SVG must be UTF-8" => "交易 SVG 必须采用 UTF-8 编码",
+            "Transaction SVG must not contain entities" => "交易 SVG 不得包含实体引用",
+            "Invalid transaction SVG XML" => "交易 SVG XML 无效",
+            "Invalid SVG namespace" => "SVG 命名空间无效",
+            "Unsupported SVG version" => "不支持此 SVG 版本",
+            "Transaction SVG has unsupported root attributes" => "交易 SVG 根元素包含不支持的属性",
+            "Use one direct path child in the transaction SVG" => {
+                "交易 SVG 必须仅包含一个直属 path 子元素"
+            }
+            "Transaction SVG path supports only the d attribute" => {
+                "交易 SVG 的 path 仅支持 d 属性"
+            }
+            "Invalid transaction SVG structure" => "交易 SVG 结构无效",
+            "Transaction SVG must contain only a path" => "交易 SVG 只能包含路径",
+            "Transaction SVG must contain only a root and one path" => {
+                "交易 SVG 只能包含根元素和一个路径"
+            }
+            "Transaction SVG needs positive width and height in pixels" => {
+                "交易 SVG 需要以像素为单位的正数宽度和高度"
+            }
+            "SVG viewBox must be 0 0 width height" => "SVG viewBox 必须为 0 0 宽度 高度",
+            "Transaction SVG needs path data" => "交易 SVG 缺少路径数据",
+            "Transaction SVG has too many path segments" => "交易 SVG 的路径段过多",
+            "Invalid transaction SVG path" => "交易 SVG 路径无效",
+            "Transaction SVG coordinates are out of range" => "交易 SVG 坐标超出范围",
+            "SVG path must start with a move command" => "SVG 路径必须以移动命令开始",
+            "Transaction SVG has no visible outline" => "交易 SVG 没有可见轮廓",
+            "Transaction SVG outline is outside its canvas" => "交易 SVG 轮廓位于画布之外",
             "Overlay" => "叠加图层",
             "Cross-dissolve" => "交叉溶解",
             "Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind." => "实验性试用：允许缺少备用图案原件。恢复后可能仍保留备用效果文件。",
-            "Experimental skin applied and bytes verified. Alternate-file recovery is incomplete. Reopen Wallet and Apple Pay and check tilt." => "实验性皮肤已应用并验证字节。备用文件无法完整恢复。请重新打开 Wallet 和 Apple Pay 并检查倾斜效果。",
-            "Known originals restored and verified. Recovery is incomplete: alternate effect files may remain. Reopen Wallet and Apple Pay and check appearance." => "已恢复并验证已知原件。恢复不完整：备用效果文件可能仍然存在。请重新打开 Wallet 和 Apple Pay 并检查外观。",
+            "Experimental skin applied and bytes verified. Effect-file recovery is incomplete. Reopen Wallet and Apple Pay and check the effects." => "实验性皮肤已应用并验证字节。效果文件无法完整恢复。请重新打开 Wallet 和 Apple Pay 并检查效果。",
+            "Known originals restored and verified. Recovery is incomplete: effect files may remain. Reopen Wallet and Apple Pay and check appearance." => "已恢复并验证已知原件。恢复不完整：效果文件可能仍然存在。请重新打开 Wallet 和 Apple Pay 并检查外观。",
             "Choose Alternate Background..." => "选择备用背景...",
             "Choose an alternate background image for cross-dissolve" => "请选择用于交叉溶解的备用背景图片",
             "The alternate background shows at rest; tilt reveals the base artwork." => "静止时显示备用背景；倾斜时显示基础图像。",

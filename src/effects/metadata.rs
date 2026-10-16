@@ -125,14 +125,28 @@ pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<
     let dynamic = serde_json::to_value(config)?;
     if let Some(existing) = object.get("dynamicLayerConfiguration") {
         let parallax_only = serde_json::json!({"version":2,"parallaxEnabled":true});
-        if existing == &parallax_only
-            && config.cross_dissolve.is_some()
-            && config.neutral_emitter.is_none()
+        let mut without_transaction = dynamic.clone();
+        without_transaction
+            .as_object_mut()
+            .unwrap()
+            .remove("transactionEffect");
+        if config.neutral_emitter.is_none()
+            && ((existing == &parallax_only
+                && (config.cross_dissolve.is_some() || config.transaction_effect.is_some()))
+                || (config.transaction_effect.is_some() && existing == &without_transaction))
         {
+            let mut changes = Vec::new();
+            for key in ["crossDissolve", "transactionEffect"] {
+                if existing.get(key).is_none()
+                    && let Some(value) = dynamic.get(key)
+                {
+                    changes.push(serde_json::json!({"operation":"add", "path":format!("/dynamicLayerConfiguration/{key}"), "value":value}));
+                }
+            }
             object.insert("dynamicLayerConfiguration".into(), dynamic.clone());
             let diff = serde_json::json!({
                 "original_sha256": sha256(original),
-                "changes": [{"operation":"add", "path":"/dynamicLayerConfiguration/crossDissolve", "value":dynamic["crossDissolve"]}]
+                "changes": changes
             });
             return Ok((
                 serde_json::to_vec_pretty(&value)?,
@@ -165,12 +179,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transaction_adds_only_to_exact_supported_layers_and_preserves_repeats() {
+        for cross in [false, true] {
+            let config = DynamicConfiguration {
+                version: 2,
+                parallax_enabled: true,
+                neutral_emitter: None,
+                cross_dissolve: cross.then(Default::default),
+                transaction_effect: Some(Default::default()),
+            };
+            let mut base = serde_json::to_value(&config).unwrap();
+            base.as_object_mut().unwrap().remove("transactionEffect");
+            let original = serde_json::to_vec(&serde_json::json!({"serialNumber":"retained", "opaque":[null,123], "dynamicLayerConfiguration":base})).unwrap();
+            let (bytes, diff) = candidate(&original, &config).unwrap();
+            assert_eq!(
+                parse_unique(&diff).unwrap()["changes"][0]["path"],
+                "/dynamicLayerConfiguration/transactionEffect"
+            );
+            assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
+            let mut disabled = config.clone();
+            disabled.transaction_effect = None;
+            assert!(candidate(&bytes, &disabled).is_err());
+            let mut unknown = parse_unique(&original).unwrap();
+            unknown["dynamicLayerConfiguration"]["unknown"] = true.into();
+            assert!(candidate(&serde_json::to_vec(&unknown).unwrap(), &config).is_err());
+            let mut wrong = parse_unique(&bytes).unwrap();
+            wrong["dynamicLayerConfiguration"]["transactionEffect"]["style"] = "other".into();
+            assert!(candidate(&serde_json::to_vec(&wrong).unwrap(), &config).is_err());
+        }
+    }
+
+    #[test]
     fn cross_dissolve_upgrades_only_exact_parallax_and_preserves_repeat_bytes() {
         let mut config = DynamicConfiguration {
             version: 2,
             parallax_enabled: true,
             neutral_emitter: None,
             cross_dissolve: Some(Default::default()),
+            transaction_effect: None,
         };
         let original = br#" {"serialNumber":"captured","large":1844674407370955161601,"dynamicLayerConfiguration":{"parallaxEnabled":true,"version":2}} "#;
         let (bytes, diff) = candidate(original, &config).unwrap();
@@ -212,6 +258,7 @@ mod tests {
             parallax_enabled: true,
             neutral_emitter: None,
             cross_dissolve: None,
+            transaction_effect: None,
         };
         let (bytes, diff) = candidate(original, &config).unwrap();
         assert_eq!(bytes, original);
@@ -252,6 +299,7 @@ mod tests {
             parallax_enabled: true,
             neutral_emitter: None,
             cross_dissolve: None,
+            transaction_effect: None,
         };
         let (bytes, diff) = candidate(original, &config).unwrap();
         let mut patched = parse_unique(&bytes).unwrap();
@@ -277,6 +325,7 @@ mod tests {
             parallax_enabled: true,
             neutral_emitter: None,
             cross_dissolve: None,
+            transaction_effect: None,
         };
         let (bytes, _) = candidate(original, &config).unwrap();
         let before = parse_unique(original).unwrap();

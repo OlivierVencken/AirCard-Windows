@@ -1459,6 +1459,7 @@ impl AirCardApp {
                         ));
                         ui.add_space(8.0);
                         self.overlay_editor.show_cross_dissolve_controls(ui, language);
+                        self.overlay_editor.show_transaction_controls(ui, language);
                     }
                 });
                 if self.overlay_enabled {
@@ -2141,6 +2142,17 @@ mod tests {
                 let alternate = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").map(PathBuf::from);
                 app.overlay_editor.set_cross_dissolve(alternate.is_some());
                 if let Some(path) = alternate { app.overlay_editor.set_alternate_background(path); }
+                app.overlay_editor.set_transaction(std::env::var_os("AIRCARD_EFFECTS_QA_TRANSACTION").is_some());
+                if std::env::var_os("AIRCARD_EFFECTS_QA_TRANSACTION").is_some() {
+                    let sprite = directory.join("qa-transaction.png");
+                    let shape = directory.join("qa-transaction.svg");
+                    let mut pixels = image::RgbaImage::new(32, 32);
+                    for y in 10..22 { for x in 10..22 { pixels.put_pixel(x, y, image::Rgba([255, 230, 180, 240])); } }
+                    pixels.save(&sprite).unwrap();
+                    std::fs::write(&shape, br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><path d="M50 5 L95 95 L5 95 Z"/></svg>"#).unwrap();
+                    app.overlay_editor.set_transaction_sprite(sprite);
+                    app.overlay_editor.set_transaction_shape(shape);
+                }
                 // Use a synthetic target to check buttons without device operations
                 app.apple_ready = true;
                 app.devices = vec![DeviceInfo { udid: "qa-phone".into(), name:"QA iPhone".into(),

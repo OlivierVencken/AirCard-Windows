@@ -24,7 +24,7 @@
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Apple Cash cards.
 - 🪄 **Parallax Card Overlays:** Combine artwork with a transparent overlay for native motion as you tilt your iPhone.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular Cowabunga & Nugget `.passthm` themes directly to iOS lockscreen.
-- ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~7.5 MB). No Python, no Flet, no webview, no bloated runtimes.
+- ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~9 MB). No Python, no Flet, no webview, no bloated runtimes.
 - 🪟 **Material Design 3 Interface:** Clean, modern dark theme built with `egui` and `eframe`.
 - 📱 **Zero-Hassle Card Detection:** Tap any card in your iPhone's Wallet app while connected to detect its hash in real-time via `syslog_relay`.
 - 📶 **USB & WiFi Transport:** Scan card events and apply Wallet or passcode assets through USB or a paired local WiFi connection.
@@ -100,6 +100,22 @@ If both transports are available, **Auto** uses USB first and falls back to WiFi
 Use artwork with background margins and keep the overlay subject away from the crop edges to allow for tilt. PNG files with an opaque checkerboard background do not provide transparency.
 
 **Cross-dissolve:** With Overlay enabled, select **Cross-dissolve** and **Choose Alternate Background...**. Choose an opaque PNG, JPG or WebP. **Base artwork** and **Alternate artwork** inspect the two compositions; the desktop preview does not simulate the native tilt reveal. The static fallback uses the base artwork. Installation requires recoverable originals for every additional PNG and will refuse missing originals. The alternate background shows at rest; tilting reveals the base artwork while parallax continues.
+
+**Transaction effect (experimental):** With Overlay enabled, select **Transaction effect (experimental)**, then **Particle PNG...** for a visible transparent PNG sprite and **Shape SVG...** for a single-path SVG. This can be combined with cross-dissolve. The small previews inspect the inputs; native playback during payment results has not yet been validated on a phone. The ordinary card preview and static fallback stay unchanged.
+
+The SVG must have positive pixel `width` and `height`, and one direct `<path>` child with only a `d` attribute. An optional `viewBox` must match `0 0 width height`. Flatten groups and transforms before importing; scripts, linked resources, entities and additional elements are rejected. A minimal shape is:
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <path d="M50 5 L95 95 L5 95 Z"/>
+</svg>
+```
+
+Normal transaction installation requires recoverable originals for the SVG and all three emitter PNG scale candidates, as well as the existing overlay assets and metadata. Missing exports block Apply. A recovered emitter PDF also blocks installation because it may take precedence. Use this executable to restore transaction applications; older versions cannot read their new recovery journal kinds.
+
+**Explicit transaction trial:** Close AirCard, then run [`try-transaction-experimental.cmd`](try-transaction-experimental.cmd) to launch with the transaction-only missing-originals exception. It permits unknown originals for the three transaction emitter PNGs and shape SVG, and shows an incomplete-recovery warning. Metadata, base artwork and cross-dissolve originals remain mandatory. Restore reapplies known originals but may leave those four transaction files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply anything automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
+
+To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; there is no animation-test button. One GUI trial completed installation and candidate readbacks, but visible transaction animation remains unvalidated.
 
 In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
 

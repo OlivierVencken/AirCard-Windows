@@ -5,6 +5,7 @@ mod device;
 mod editor;
 mod metadata;
 mod recovery;
+mod transaction;
 pub(crate) mod transport;
 
 pub(crate) use editor::OverlayEditor;

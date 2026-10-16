@@ -30,8 +30,12 @@ struct Draft {
     foreground: Option<PathBuf>,
     alignment: Alignment,
     recovery: Option<Recovery>,
+    prior_recovery: Option<Recovery>,
     cross_dissolve: bool,
     alternate_background: Option<PathBuf>,
+    transaction: bool,
+    transaction_sprite: Option<PathBuf>,
+    transaction_shape: Option<PathBuf>,
 }
 
 impl Draft {
@@ -44,6 +48,7 @@ impl Draft {
                 parallax_enabled: true,
                 neutral_emitter: None,
                 cross_dissolve: self.cross_dissolve.then(Default::default),
+                transaction_effect: self.transaction.then(Default::default),
             },
             background: self
                 .background
@@ -54,6 +59,24 @@ impl Draft {
                 .clone()
                 .context("Choose a transparent overlay PNG")?,
             emitter_sprite: None,
+            transaction_sprite: if self.transaction {
+                Some(
+                    self.transaction_sprite
+                        .clone()
+                        .context("Choose a transaction particle PNG")?,
+                )
+            } else {
+                None
+            },
+            transaction_shape: if self.transaction {
+                Some(
+                    self.transaction_shape
+                        .clone()
+                        .context("Choose a transaction shape SVG")?,
+                )
+            } else {
+                None
+            },
             alternate_background: if self.cross_dissolve {
                 Some(
                     self.alternate_background
@@ -72,7 +95,7 @@ impl Draft {
 }
 
 enum Completed {
-    Preview(EditorPreview),
+    Preview(Box<EditorPreview>),
     Applied(bool),
     Restored(bool),
 }
@@ -85,6 +108,8 @@ pub(crate) struct OverlayEditor {
     draft: Draft,
     preview_texture: Option<egui::TextureHandle>,
     alternate_texture: Option<egui::TextureHandle>,
+    transaction_texture: Option<egui::TextureHandle>,
+    transaction_outline: Option<super::transaction::Shape>,
     show_alternate: bool,
     dirty: bool,
     status: Option<String>,
@@ -95,15 +120,25 @@ pub(crate) struct OverlayEditor {
 
 impl Default for OverlayEditor {
     fn default() -> Self {
-        let draft = recovery::regular_read(&draft_path(), 16 * 1024)
+        let mut draft: Draft = recovery::regular_read(&draft_path(), 16 * 1024)
             .ok()
             .and_then(|bytes| super::metadata::parse_unique(&bytes).ok())
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
+        if draft.prior_recovery.is_some()
+            && draft
+                .recovery
+                .as_ref()
+                .is_some_and(|r| device::no_installation_to_recover(&r.directory))
+        {
+            draft.recovery = draft.prior_recovery.take();
+        }
         Self {
             draft,
             preview_texture: None,
             alternate_texture: None,
+            transaction_texture: None,
+            transaction_outline: None,
             show_alternate: false,
             dirty: true,
             status: None,
@@ -193,18 +228,24 @@ impl OverlayEditor {
                     self.receiver = None;
                     match result {
                         Ok(Completed::Preview(preview)) => {
+                            let preview = *preview;
                             self.preview_issue = preview.issue;
                             self.install(ctx, preview.artwork);
                             self.status = None;
                         }
                         Ok(Completed::Applied(limited)) => {
+                            self.draft.prior_recovery = None;
+                            if let Err(error) = self.remember() {
+                                self.error =
+                                    Some(format!("Could not save overlay settings: {error:#}"));
+                            }
                             self.status = Some(if limited {
-                                "Experimental skin applied and bytes verified. Alternate-file recovery is incomplete. Reopen Wallet and Apple Pay and check tilt."
+                                "Experimental skin applied and bytes verified. Effect-file recovery is incomplete. Reopen Wallet and Apple Pay and check the effects."
                             } else { "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." }.into());
                         }
                         Ok(Completed::Restored(limited)) => {
                             self.status = Some(if limited {
-                                "Known originals restored and verified. Recovery is incomplete: alternate effect files may remain. Reopen Wallet and Apple Pay and check appearance."
+                                "Known originals restored and verified. Recovery is incomplete: effect files may remain. Reopen Wallet and Apple Pay and check appearance."
                             } else { "Previous skin restored. Force-close and reopen Wallet and Apple Pay." }.into());
                             if !limited {
                                 self.draft.recovery = None;
@@ -215,6 +256,19 @@ impl OverlayEditor {
                             }
                         }
                         Err(error) => {
+                            if self.draft.prior_recovery.is_some()
+                                && self.draft.recovery.as_ref().is_some_and(|r| {
+                                    device::no_installation_to_recover(&r.directory)
+                                })
+                            {
+                                self.draft.recovery = self.draft.prior_recovery.take();
+                                if let Err(save_error) = self.remember() {
+                                    self.error = Some(format!(
+                                        "{error}; Could not save overlay settings: {save_error:#}"
+                                    ));
+                                    break;
+                                }
+                            }
                             self.status = None;
                             self.error = Some(error);
                         }
@@ -232,6 +286,20 @@ impl OverlayEditor {
     }
 
     fn install(&mut self, ctx: &egui::Context, preview: EffectsPreview) {
+        self.transaction_texture = preview.transaction_sprite.as_ref().map(|image| {
+            ctx.load_texture(
+                "wallet-transaction-sprite",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        self.transaction_outline = preview
+            .transaction_shape
+            .as_ref()
+            .and_then(|bytes| super::transaction::validate(bytes).ok());
         self.alternate_texture = preview.alternate_composite().map(|image| {
             ctx.load_texture(
                 "wallet-cross-dissolve-alternate",
@@ -280,6 +348,8 @@ impl OverlayEditor {
         self.dirty = true;
         self.preview_texture = None;
         self.alternate_texture = None;
+        self.transaction_texture = None;
+        self.transaction_outline = None;
         self.error = None;
         self.status = None;
         self.preview_issue = None;
@@ -363,9 +433,7 @@ impl OverlayEditor {
             ui.small(language.text("Choose an alternate background image for cross-dissolve"));
         }
         ui.small(
-            language.text(
-                "The alternate background shows at rest; tilt reveals the base artwork.",
-            ),
+            language.text("The alternate background shows at rest; tilt reveals the base artwork."),
         );
         ui.add_enabled_ui(self.alternate_texture.is_some(), |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -386,6 +454,82 @@ impl OverlayEditor {
         );
     }
 
+    pub(crate) fn set_transaction(&mut self, enabled: bool) {
+        self.draft.transaction = enabled;
+        self.invalidate_preview();
+    }
+
+    pub(crate) fn set_transaction_sprite(&mut self, path: PathBuf) {
+        self.draft.transaction_sprite = Some(path);
+        self.invalidate_preview();
+    }
+
+    pub(crate) fn set_transaction_shape(&mut self, path: PathBuf) {
+        self.draft.transaction_shape = Some(path);
+        self.invalidate_preview();
+    }
+
+    pub fn show_transaction_controls(&mut self, ui: &mut egui::Ui, language: Language) {
+        let mut enabled = self.draft.transaction;
+        let mut changed = ui
+            .checkbox(
+                &mut enabled,
+                language.text("Transaction effect (experimental)"),
+            )
+            .changed();
+        if changed {
+            self.set_transaction(enabled);
+        }
+        if enabled {
+            if device::experimental_transaction_enabled() {
+                ui.colored_label(ui.visuals().warn_fg_color, language.text("Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind."));
+            }
+            ui.small(language.text("An expanding particle outline during payment results. Phone playback is not yet validated."));
+            ui.horizontal(|ui| {
+                let has_preview = self.transaction_texture.is_some() && self.transaction_outline.is_some();
+                let picker_width = (ui.available_width() - if has_preview { 108.0 } else { 0.0 }).max(160.0);
+                ui.allocate_ui_with_layout(egui::vec2(picker_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button(language.text("Particle PNG...")).clicked()
+                            && let Some(path) = rfd::FileDialog::new().add_filter("Transparent PNG", &["png"]).pick_file() {
+                            self.set_transaction_sprite(path); changed = true;
+                        }
+                        if let Some(path) = &self.draft.transaction_sprite {
+                            ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
+                        } else { ui.small(language.text("Choose a transaction particle PNG")); }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button(language.text("Shape SVG...")).on_hover_text(language.text("SVG needs width and height, with one direct path and only a d attribute. Flatten transforms and groups before importing.")).clicked()
+                            && let Some(path) = rfd::FileDialog::new().add_filter("Single-path SVG", &["svg"]).pick_file() {
+                            self.set_transaction_shape(path); changed = true;
+                        }
+                        if let Some(path) = &self.draft.transaction_shape {
+                            ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
+                        } else { ui.small(language.text("Choose a transaction shape SVG")); }
+                    });
+                });
+                if let (Some(texture), Some(shape)) = (&self.transaction_texture, &self.transaction_outline) {
+                    ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(24.0, 24.0) * (texture.size_vec2() / texture.size_vec2().max_elem())));
+                    let size = egui::vec2(64.0, 64.0);
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let painter = ui.painter_at(rect);
+                    for contour in &shape.contours {
+                        let points = contour.iter().map(|p| rect.min + egui::vec2(p[0], p[1]) * size).collect();
+                        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, ui.visuals().text_color())));
+                    }
+                }
+            });
+            ui.small(
+                language.text(
+                    "Particle and outline preview only; payment animation runs on the phone.",
+                ),
+            );
+        }
+        if changed && let Err(error) = self.remember() {
+            self.error = Some(format!("Could not save overlay settings: {error:#}"));
+        }
+    }
+
     pub fn update_preview(&mut self, ctx: &egui::Context, device_busy: bool) {
         if self.dirty
             && !self.busy()
@@ -395,10 +539,10 @@ impl OverlayEditor {
             self.dirty = false;
             self.start(ctx, move |progress| {
                 progress("Loading overlay preview…");
-                Ok(Completed::Preview(artwork::preview_for_editor(
+                Ok(Completed::Preview(Box::new(artwork::preview_for_editor(
                     &config,
                     Path::new("."),
-                )?))
+                )?)))
             });
         }
     }
@@ -421,6 +565,7 @@ impl OverlayEditor {
         let result = (|| -> Result<_> {
             let config = self.draft.configuration()?;
             let directory = device::new_application_directory()?;
+            self.draft.prior_recovery = self.draft.recovery.clone();
             self.draft.recovery = Some(Recovery {
                 binding: binding.clone(),
                 directory: directory.join("recovery"),
@@ -434,7 +579,18 @@ impl OverlayEditor {
                     binding, config, &directory, progress,
                 )?))
             }),
-            Err(error) => self.error = Some(format!("Could not start Apply: {error:#}")),
+            Err(error) => {
+                if self.draft.prior_recovery.is_some()
+                    && self
+                        .draft
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|r| device::no_installation_to_recover(&r.directory))
+                {
+                    self.draft.recovery = self.draft.prior_recovery.take();
+                }
+                self.error = Some(format!("Could not start Apply: {error:#}"));
+            }
         }
     }
 
@@ -658,6 +814,44 @@ mod tests {
                 .alternate_background
                 .is_none()
         );
+        editor.set_transaction(true);
+        assert!(editor.draft.configuration().is_err());
+        let transaction_shape = directory.join("shape.svg");
+        std::fs::write(
+            &transaction_shape,
+            br#"<svg width="100" height="100"><path d="M50 5L95 95L5 95Z"/></svg>"#,
+        )
+        .unwrap();
+        editor.set_transaction_shape(transaction_shape.clone());
+        assert!(editor.draft.configuration().is_err());
+        editor.set_transaction_sprite(editor.overlay_path().unwrap().to_path_buf());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.ready(), "{:?}", editor.error);
+        assert!(editor.transaction_texture.is_some() && editor.transaction_outline.is_some());
+        let saved: Draft =
+            serde_json::from_slice(&serde_json::to_vec(&editor.draft).unwrap()).unwrap();
+        assert!(saved.transaction);
+        assert_eq!(saved.transaction_shape, Some(transaction_shape.clone()));
+        editor.set_transaction_shape(directory.join("missing.svg"));
+        assert!(!editor.ready());
+        assert!(editor.transaction_texture.is_none() && editor.transaction_outline.is_none());
+        let _ = render(&mut editor);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.busy() && std::time::Instant::now() < deadline {
+            editor.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!editor.ready() && editor.error.is_some());
+        editor.set_transaction_shape(transaction_shape.clone());
+        editor.set_transaction(false);
+        let config = editor.draft.configuration().unwrap();
+        assert!(config.transaction_shape.is_none() && config.transaction_sprite.is_none());
+        assert_eq!(editor.draft.transaction_shape, Some(transaction_shape));
         editor.sync_background(Some(directory.join("replacement.jpg")), [0.25, 0.5]);
         assert!(
             !editor.ready(),

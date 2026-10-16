@@ -23,6 +23,10 @@ pub(crate) fn experimental_cross_dissolve_enabled() -> bool {
     std::env::var("AIRCARD_EXPERIMENTAL_CROSS_DISSOLVE_NO_ALTERNATE_BACKUP").as_deref() == Ok("1")
 }
 
+pub(crate) fn experimental_transaction_enabled() -> bool {
+    std::env::var("AIRCARD_EXPERIMENTAL_TRANSACTION_NO_ASSET_BACKUP").as_deref() == Ok("1")
+}
+
 fn random_token() -> Result<String> {
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -610,7 +614,10 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding, kind: JournalKind)
     ensure!(
         matches!(
             kind,
-            JournalKind::MetadataCapture | JournalKind::MetadataCrossDissolveCapture
+            JournalKind::MetadataCapture
+                | JournalKind::MetadataCrossDissolveCapture
+                | JournalKind::MetadataTransactionCapture
+                | JournalKind::MetadataCrossDissolveTransactionCapture
         ),
         "Invalid capture kind"
     );
@@ -644,6 +651,7 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding, kind: JournalKind)
             .collect(),
         protected_readback_verified: false,
         allow_missing_cross_dissolve_originals: false,
+        allow_missing_transaction_originals: false,
     };
     save(dir, &journal)?;
     capture_and_return(dir, &mut journal, &mut afc, &session, &[0, 1, 2])?;
@@ -887,12 +895,18 @@ fn verify_candidate_export(
 fn installation_ready(journal: &Journal) -> bool {
     journal.roots.is_empty()
         && match journal.kind {
-            JournalKind::MetadataCapture | JournalKind::MetadataCrossDissolveCapture => matches!(
+            JournalKind::MetadataCapture
+            | JournalKind::MetadataCrossDissolveCapture
+            | JournalKind::MetadataTransactionCapture
+            | JournalKind::MetadataCrossDissolveTransactionCapture => matches!(
                 journal.status.as_str(),
                 "MetadataCapturedAndReappliedAwaitingVisualConfirmation"
                     | "CapturedMetadataAndAssetsReappliedAwaitingVisualConfirmation"
             ),
-            JournalKind::MetadataParallax | JournalKind::MetadataCrossDissolve => {
+            JournalKind::MetadataParallax
+            | JournalKind::MetadataCrossDissolve
+            | JournalKind::MetadataTransaction
+            | JournalKind::MetadataCrossDissolveTransaction => {
                 journal.status
                     == "ParallaxOriginalsReadbackMatchedAndReappliedAwaitingVisualConfirmation"
             }
@@ -900,17 +914,23 @@ fn installation_ready(journal: &Journal) -> bool {
         }
 }
 
+/// Purely local decision: a verified capture with no installation can keep the
+/// prior UI recovery selection. Unfinished mutation/recovery must remain selected.
+pub(super) fn no_installation_to_recover(directory: &Path) -> bool {
+    directory.try_exists().is_ok_and(|exists| !exists)
+        || load(directory)
+            .is_ok_and(|journal| !journal.kind.is_installation() && installation_ready(&journal))
+}
+
 fn plan_overlay_installation(
     journal: &Journal,
     deployment: &artwork::PreparedDeployment,
     original: &[u8],
 ) -> Result<Vec<(usize, Vec<u8>)>> {
-    let cross_dissolve = matches!(
-        journal.kind,
-        JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
-    );
+    let cross_dissolve = journal.kind.cross_dissolve();
     ensure!(
-        cross_dissolve == deployment.contains_cross_dissolve,
+        cross_dissolve == deployment.contains_cross_dissolve
+            && journal.kind.transaction() == deployment.contains_transaction,
         "Pack does not match captured effect inventory"
     );
     ensure!(
@@ -924,7 +944,7 @@ fn plan_overlay_installation(
     );
     ensure!(
         deployment.original_metadata == original
-            && journal.assets[3].original_sha256.as_deref() == Some(&sha256(&original)),
+            && journal.assets[3].original_sha256.as_deref() == Some(&sha256(original)),
         "Pack does not bind the exact captured original JSON"
     );
     let mut planned = vec![(3, deployment.candidate_metadata.clone())];
@@ -938,7 +958,7 @@ fn plan_overlay_installation(
         }
         ensure!(
             asset.original_sha256.is_some() || journal.allows_missing_original(asset),
-            "Every overwritten dynamic PNG requires a captured original: {}",
+            "Every overwritten dynamic resource requires a captured original: {}",
             asset.leaf
         );
         let base = asset.leaf.replace("@2x", "").replace("@3x", "");
@@ -950,10 +970,41 @@ fn plan_overlay_installation(
         planned.push((index, resource.bytes.clone()));
     }
     ensure!(
-        planned.len() == if cross_dissolve { 13 } else { 10 },
+        planned.len()
+            == 10
+                + if cross_dissolve { 3 } else { 0 }
+                + if deployment.contains_transaction {
+                    4
+                } else {
+                    0
+                },
         "Overlay candidate inventory does not match the selected effect"
     );
     Ok(planned)
+}
+
+fn record_trial_policy(
+    dir: &Path,
+    journal: &mut Journal,
+    deployment: &artwork::PreparedDeployment,
+    cross_opt_in: bool,
+    transaction_opt_in: bool,
+) -> Result<()> {
+    ensure!(
+        journal.kind.transaction() == deployment.contains_transaction
+            && journal.kind.cross_dissolve() == deployment.contains_cross_dissolve,
+        "Pack does not match captured effect inventory"
+    );
+    if deployment.contains_transaction && transaction_opt_in {
+        journal.allow_missing_transaction_originals = true;
+        // Persist the policy before installation preflight or a new native session.
+        save(dir, journal)?;
+    } else if deployment.contains_cross_dissolve && !deployment.contains_transaction && cross_opt_in
+    {
+        journal.allow_missing_cross_dissolve_originals = true;
+        save(dir, journal)?;
+    }
+    Ok(())
 }
 
 fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result<()> {
@@ -963,17 +1014,18 @@ fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result
         "A complete verified metadata capture is required"
     );
     let deployment = artwork::load_deployment(pack)?;
-    if deployment.contains_cross_dissolve && experimental_cross_dissolve_enabled() {
-        journal.allow_missing_cross_dissolve_originals = true;
-        // Durable before opening the installation session or performing preimage checks.
-        save(dir, &journal)?;
-    }
+    record_trial_policy(
+        dir,
+        &mut journal,
+        &deployment,
+        experimental_cross_dissolve_enabled(),
+        experimental_transaction_enabled(),
+    )?;
     let original = regular_read(
         &dir.join("original-pass.json"),
         super::metadata::MAX_JSON_BYTES,
     )?;
     let planned = plan_overlay_installation(&journal, &deployment, &original)?;
-    let cross_dissolve = deployment.contains_cross_dissolve;
     let (session, mut afc) = open(&journal.binding)?;
     // Recheck preimages before mutation and restore them on any result
     let originals: Vec<_> = journal
@@ -991,11 +1043,11 @@ fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result
         write_new_or_same(&dir.join(format!("candidate-{index}.bin")), bytes)?;
         journal.assets[*index].candidate_sha256 = sha256(bytes);
     }
-    journal.kind = if cross_dissolve {
-        JournalKind::MetadataCrossDissolve
-    } else {
-        JournalKind::MetadataParallax
-    };
+    journal.kind = JournalKind::for_effects(
+        deployment.contains_cross_dissolve,
+        deployment.contains_transaction,
+        true,
+    );
     journal.trial_pack_sha256 = Some(deployment.manifest_sha256);
     journal.status = "ParallaxInstallIntent".into();
     save(dir, &journal)?;
@@ -1057,6 +1109,10 @@ pub(crate) fn apply(
         config.alternate_background =
             Some(frozen_artwork.join("backgroundParallaxCrossDissolve.png"));
     }
+    if config.transaction_sprite.is_some() {
+        config.transaction_sprite = Some(frozen_artwork.join("transactionEffectEmitter.png"));
+        config.transaction_shape = Some(frozen_artwork.join("transactionEffectShape.svg"));
+    }
     config.original_pass_json = capture.join("original-pass.json");
     config.output_directory = directory.join("pack");
     let _lock = DeviceLock::acquire(&binding)?;
@@ -1064,11 +1120,14 @@ pub(crate) fn apply(
     let operation = (|| -> Result<()> {
         progress("Backing up current card metadata and artwork…");
         needs_recovery = true;
-        let kind = if config.dynamic_layer_configuration.cross_dissolve.is_some() {
-            JournalKind::MetadataCrossDissolveCapture
-        } else {
-            JournalKind::MetadataCapture
-        };
+        let kind = JournalKind::for_effects(
+            config.dynamic_layer_configuration.cross_dissolve.is_some(),
+            config
+                .dynamic_layer_configuration
+                .transaction_effect
+                .is_some(),
+            false,
+        );
         capture_metadata_for_binding(&capture, binding, kind)?;
         needs_recovery = false;
         progress("Preparing overlay skin…");
@@ -1089,7 +1148,7 @@ pub(crate) fn apply(
         .with_context(|| format!("Recovery backup: {}", capture.display()));
         let limited = load(&capture)?.incomplete_recovery();
         return result.with_context(|| if limited {
-            "Experimental recovery is incomplete: known originals can be restored, but alternate effect files may remain"
+            "Experimental recovery is incomplete: known originals can be restored, but effect files may remain"
         } else { "Overlay operation failed" }).map(|()| limited);
     }
     operation.map(|()| false)
@@ -1126,6 +1185,240 @@ pub(crate) fn restore(directory: &Path, expected: &Binding) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_trial_is_durable_narrow_and_keeps_unknown_originals_unknown() {
+        for cross in [false, true] {
+            let mut journal = recovery_capture_fixture();
+            journal.kind = JournalKind::for_effects(cross, true, false);
+            journal.assets = inventory(&journal.kind)
+                .into_iter()
+                .map(|leaf| Asset {
+                    original_sha256: (!(leaf.starts_with("transaction") || leaf.ends_with(".pdf"))
+                        || leaf.starts_with("cardBackgroundCombined"))
+                    .then(|| sha256(b"original")),
+                    candidate_sha256: sha256(b"candidate"),
+                    leaf,
+                })
+                .collect();
+            let resources = [
+                "backgroundParallax.png",
+                "foregroundParallax.png",
+                "dynamicLayerStaticFallback.png",
+                "backgroundParallaxCrossDissolve.png",
+                "transactionEffectEmitter.png",
+                "transactionEffectShape.svg",
+            ];
+            let deployment = artwork::PreparedDeployment {
+                manifest_sha256: sha256(b"transaction-trial-pack"),
+                original_metadata: b"original".to_vec(),
+                candidate_metadata: b"candidate".to_vec(),
+                contains_emitter: false,
+                contains_cross_dissolve: cross,
+                contains_transaction: true,
+                resources: resources
+                    .iter()
+                    .map(|name| artwork::PreparedResource {
+                        filename: (*name).into(),
+                        bytes: name.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            };
+            let dir = std::env::temp_dir().join(format!(
+                "transaction-trial-policy-{}",
+                random_token().unwrap()
+            ));
+            fs::create_dir(&dir).unwrap();
+            assert!(
+                !serde_json::to_value(&journal)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .contains_key("allow_missing_transaction_originals")
+            );
+            record_trial_policy(&dir, &mut journal, &deployment, true, false).unwrap();
+            assert!(
+                !journal.allow_missing_transaction_originals
+                    && !journal.allow_missing_cross_dissolve_originals
+            );
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+            record_trial_policy(&dir, &mut journal, &deployment, true, true).unwrap();
+            let mut journal = load(&dir).unwrap(); // Policy survives reopening without an environment variable.
+            assert!(
+                journal.allow_missing_transaction_originals
+                    && !journal.allow_missing_cross_dissolve_originals
+            );
+            let plan = plan_overlay_installation(&journal, &deployment, b"original").unwrap();
+            assert_eq!(plan.len(), if cross { 17 } else { 14 });
+            for index in 3..journal.assets.len() {
+                let asset = &journal.assets[index];
+                if asset.leaf.ends_with(".pdf") {
+                    assert!(!journal.allows_missing_original(asset));
+                } else if !asset.leaf.starts_with("transaction") {
+                    let original = journal.assets[index].original_sha256.take();
+                    assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+                    journal.assets[index].original_sha256 = original;
+                }
+            }
+            let pdf = journal
+                .assets
+                .iter()
+                .position(|a| a.leaf == "transactionEffectEmitter.pdf")
+                .unwrap();
+            journal.assets[pdf].original_sha256 = Some(sha256(b"pdf"));
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+            journal.assets[pdf].original_sha256 = None;
+            // Wrong journal kinds cannot acquire a policy that would make recovery unreadable.
+            let before = fs::read(dir.join("journal.json")).unwrap();
+            journal.kind = JournalKind::MetadataCapture;
+            assert!(record_trial_policy(&dir, &mut journal, &deployment, false, true).is_err());
+            assert_eq!(fs::read(dir.join("journal.json")).unwrap(), before);
+            journal.kind = JournalKind::for_effects(cross, true, true);
+            journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
+            for (index, bytes) in &plan {
+                journal.assets[*index].candidate_sha256 = sha256(bytes);
+            }
+            save(&dir, &journal).unwrap();
+            let mut journal = load(&dir).unwrap();
+            assert!(journal.incomplete_recovery());
+            for (index, bytes) in &plan {
+                if !journal.assets[*index].leaf.starts_with("transaction") {
+                    continue;
+                }
+                assert!(journal.assets[*index].original_sha256.is_none());
+                retain_held_bytes(&dir, &mut journal, *index, bytes).unwrap();
+                assert!(journal.assets[*index].original_sha256.is_none());
+                assert!(!dir.join(format!("original-{index}.bin")).exists());
+                assert!(
+                    retain_held_bytes(&dir, &mut journal, *index, b"conflicting held bytes")
+                        .is_err()
+                );
+                assert_eq!(
+                    fs::read(dir.join(format!("observed-candidate-{index}.bin"))).unwrap(),
+                    *bytes
+                );
+            }
+            for (index, asset) in journal.assets.iter().enumerate() {
+                if asset.original_sha256.is_some() {
+                    write_new_or_same(&dir.join(format!("original-{index}.bin")), b"original")
+                        .unwrap();
+                }
+            }
+            assert!(
+                original_payloads(&dir, &journal, None)
+                    .unwrap()
+                    .iter()
+                    .all(|(leaf, _)| !leaf.starts_with("transaction"))
+            );
+            save(&dir, &journal).unwrap();
+            assert!(load(&dir).unwrap().incomplete_recovery());
+            for kind in [
+                JournalKind::MetadataCapture,
+                JournalKind::MetadataParallax,
+                JournalKind::MetadataCrossDissolveCapture,
+                JournalKind::MetadataCrossDissolve,
+                JournalKind::DynamicPng,
+                JournalKind::ArtworkControl,
+                JournalKind::FrontFaceCache,
+            ] {
+                journal.kind = kind;
+                save(&dir, &journal).unwrap();
+                assert!(load(&dir).is_err());
+            }
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn transaction_requires_svg_and_every_png_original_with_no_backup_exception() {
+        for cross in [false, true] {
+            let mut journal = recovery_capture_fixture();
+            let legacy = inventory(&JournalKind::MetadataCapture);
+            journal.kind = JournalKind::for_effects(cross, true, false);
+            let names = inventory(&journal.kind);
+            assert_eq!(names.len(), if cross { 35 } else { 29 });
+            assert_eq!(&names[..22], &legacy);
+            journal.assets = names
+                .iter()
+                .map(|leaf| Asset {
+                    leaf: leaf.clone(),
+                    original_sha256: (!leaf.ends_with(".pdf")
+                        || leaf.starts_with("cardBackgroundCombined"))
+                    .then(|| sha256(b"original")),
+                    candidate_sha256: sha256(b"candidate"),
+                })
+                .collect();
+            let mut deployment = artwork::PreparedDeployment {
+                manifest_sha256: sha256(b"pack"),
+                original_metadata: b"original".to_vec(),
+                candidate_metadata: b"candidate".to_vec(),
+                contains_emitter: false,
+                contains_cross_dissolve: cross,
+                contains_transaction: true,
+                resources: [
+                    "backgroundParallax.png",
+                    "foregroundParallax.png",
+                    "dynamicLayerStaticFallback.png",
+                    "backgroundParallaxCrossDissolve.png",
+                    "transactionEffectEmitter.png",
+                    "transactionEffectShape.svg",
+                ]
+                .iter()
+                .map(|name| artwork::PreparedResource {
+                    filename: (*name).into(),
+                    bytes: name.as_bytes().to_vec(),
+                })
+                .collect(),
+            };
+            assert!(installation_ready(&journal));
+            let plan = plan_overlay_installation(&journal, &deployment, b"original").unwrap();
+            assert_eq!(plan.len(), if cross { 17 } else { 14 });
+            assert_eq!(plan.last().unwrap().1, b"transactionEffectShape.svg");
+            assert!(
+                artwork_verification_groups(&journal)
+                    .concat()
+                    .contains(&(names.len() - 1))
+            );
+            for index in 4..journal.assets.len() {
+                if journal.assets[index].leaf.ends_with(".pdf") {
+                    continue;
+                }
+                journal.assets[index].original_sha256 = None;
+                assert!(!journal.allows_missing_original(&journal.assets[index]));
+                assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+                journal.assets[index].original_sha256 = Some(sha256(b"original"));
+            }
+            let pdf = names
+                .iter()
+                .position(|n| n == "transactionEffectEmitter.pdf")
+                .unwrap();
+            journal.assets[pdf].original_sha256 = Some(sha256(b"pdf"));
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+            journal.assets[pdf].original_sha256 = None;
+            deployment.contains_transaction = false;
+            assert!(plan_overlay_installation(&journal, &deployment, b"original").is_err());
+            deployment.contains_transaction = true;
+            let dir = std::env::temp_dir()
+                .join(format!("transaction-journal-{}", random_token().unwrap()));
+            fs::create_dir(&dir).unwrap();
+            save(&dir, &journal).unwrap();
+            assert!(load(&dir).is_ok());
+            assert!(no_installation_to_recover(&dir));
+            journal.allow_missing_cross_dissolve_originals = true;
+            save(&dir, &journal).unwrap();
+            assert!(load(&dir).is_err());
+            journal.allow_missing_cross_dissolve_originals = false;
+            journal.kind = JournalKind::for_effects(cross, true, true);
+            journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
+            save(&dir, &journal).unwrap();
+            assert!(load(&dir).is_ok());
+            assert!(!no_installation_to_recover(&dir));
+            journal.assets.last_mut().unwrap().original_sha256 = None;
+            save(&dir, &journal).unwrap();
+            assert!(load(&dir).is_err());
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
 
     #[test]
     fn front_face_cache_capture_is_bound_to_one_cache_leaf() {
@@ -1181,6 +1474,7 @@ mod tests {
                 }],
                 protected_readback_verified: false,
                 allow_missing_cross_dissolve_originals: false,
+                allow_missing_transaction_originals: false,
             };
             save(&capture, &journal)?;
             let operation = (|| -> Result<Vec<usize>> {
@@ -1478,6 +1772,7 @@ mod tests {
             candidate_metadata: b"candidate".to_vec(),
             contains_emitter: false,
             contains_cross_dissolve: true,
+            contains_transaction: false,
             resources: [
                 "backgroundParallax",
                 "foregroundParallax",

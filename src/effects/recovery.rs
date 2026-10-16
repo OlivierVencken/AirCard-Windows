@@ -143,6 +143,10 @@ pub(super) enum JournalKind {
     MetadataParallax,
     MetadataCrossDissolveCapture,
     MetadataCrossDissolve,
+    MetadataTransactionCapture,
+    MetadataTransaction,
+    MetadataCrossDissolveTransactionCapture,
+    MetadataCrossDissolveTransaction,
     FrontFaceCache,
 }
 
@@ -154,21 +158,75 @@ impl JournalKind {
         }
     }
     pub(super) fn is_installation(self) -> bool {
-        matches!(self, Self::MetadataParallax | Self::MetadataCrossDissolve)
-    }
-    pub(super) fn has_metadata(self) -> bool {
         matches!(
             self,
-            Self::MetadataCapture
-                | Self::MetadataParallax
-                | Self::MetadataCrossDissolveCapture
+            Self::MetadataParallax
                 | Self::MetadataCrossDissolve
+                | Self::MetadataTransaction
+                | Self::MetadataCrossDissolveTransaction
         )
+    }
+    pub(super) fn transaction(self) -> bool {
+        matches!(
+            self,
+            Self::MetadataTransactionCapture
+                | Self::MetadataTransaction
+                | Self::MetadataCrossDissolveTransactionCapture
+                | Self::MetadataCrossDissolveTransaction
+        )
+    }
+    pub(super) fn cross_dissolve(self) -> bool {
+        matches!(
+            self,
+            Self::MetadataCrossDissolveCapture
+                | Self::MetadataCrossDissolve
+                | Self::MetadataCrossDissolveTransactionCapture
+                | Self::MetadataCrossDissolveTransaction
+        )
+    }
+    pub(super) fn for_effects(cross: bool, transaction: bool, installed: bool) -> Self {
+        match (cross, transaction, installed) {
+            (false, false, false) => Self::MetadataCapture,
+            (false, false, true) => Self::MetadataParallax,
+            (true, false, false) => Self::MetadataCrossDissolveCapture,
+            (true, false, true) => Self::MetadataCrossDissolve,
+            (false, true, false) => Self::MetadataTransactionCapture,
+            (false, true, true) => Self::MetadataTransaction,
+            (true, true, false) => Self::MetadataCrossDissolveTransactionCapture,
+            (true, true, true) => Self::MetadataCrossDissolveTransaction,
+        }
+    }
+    pub(super) fn has_metadata(self) -> bool {
+        self.transaction()
+            || matches!(
+                self,
+                Self::MetadataCapture
+                    | Self::MetadataParallax
+                    | Self::MetadataCrossDissolveCapture
+                    | Self::MetadataCrossDissolve
+            )
     }
 }
 
 pub(super) fn inventory(kind: &JournalKind) -> Vec<String> {
     match kind {
+        JournalKind::MetadataTransactionCapture
+        | JournalKind::MetadataTransaction
+        | JournalKind::MetadataCrossDissolveTransactionCapture
+        | JournalKind::MetadataCrossDissolveTransaction => {
+            let base = if kind.cross_dissolve() {
+                JournalKind::MetadataCrossDissolveCapture
+            } else {
+                JournalKind::MetadataCapture
+            };
+            let mut names = inventory(&base);
+            names.extend(
+                [".png", "@2x.png", "@3x.png", ".pdf", "@2x.pdf", "@3x.pdf"]
+                    .map(|s| format!("transactionEffectEmitter{s}")),
+            );
+            names.push("transactionEffectShape.svg".into());
+            names
+        }
         JournalKind::FrontFaceCache => vec!["FrontFace".into()],
         JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve => {
             let mut names = inventory(&JournalKind::MetadataCapture);
@@ -241,21 +299,33 @@ pub(super) struct Journal {
     // Explicit operator opt-in; absence remains Unknown, never a fabricated original.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) allow_missing_cross_dissolve_originals: bool,
+    // Narrow transaction trial policy, independent of the alternate-background exception.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) allow_missing_transaction_originals: bool,
 }
 
 impl Journal {
     pub(super) fn allows_missing_original(&self, asset: &Asset) -> bool {
-        self.allow_missing_cross_dissolve_originals
-            && matches!(
-                self.kind,
-                JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
-            )
+        (self.allow_missing_transaction_originals
+            && self.kind.transaction()
             && matches!(
                 asset.leaf.as_str(),
-                "backgroundParallaxCrossDissolve.png"
-                    | "backgroundParallaxCrossDissolve@2x.png"
-                    | "backgroundParallaxCrossDissolve@3x.png"
-            )
+                "transactionEffectEmitter.png"
+                    | "transactionEffectEmitter@2x.png"
+                    | "transactionEffectEmitter@3x.png"
+                    | "transactionEffectShape.svg"
+            ))
+            || (self.allow_missing_cross_dissolve_originals
+                && matches!(
+                    self.kind,
+                    JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
+                )
+                && matches!(
+                    asset.leaf.as_str(),
+                    "backgroundParallaxCrossDissolve.png"
+                        | "backgroundParallaxCrossDissolve@2x.png"
+                        | "backgroundParallaxCrossDissolve@3x.png"
+                ))
     }
 
     pub(super) fn incomplete_recovery(&self) -> bool {
@@ -295,6 +365,10 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
         "Journal checksum mismatch"
     );
     let journal: Journal = serde_json::from_slice(bytes)?;
+    ensure!(
+        !journal.allow_missing_transaction_originals || journal.kind.transaction(),
+        "Transaction backup exception is invalid for this recovery kind"
+    );
     ensure!(
         !journal.allow_missing_cross_dissolve_originals
             || matches!(
@@ -360,7 +434,7 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
                 .assets
                 .iter()
                 .enumerate()
-                .filter(|(i, a)| *i <= 3 || a.leaf.ends_with(".png"))
+                .filter(|(i, a)| *i <= 3 || a.leaf.ends_with(".png") || a.leaf.ends_with(".svg"))
                 .all(|(_, a)| a.original_sha256.is_some() || journal.allows_missing_original(a)),
             "Parallax recovery requires every overwritten original including metadata"
         );
