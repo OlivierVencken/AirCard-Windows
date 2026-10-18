@@ -9,9 +9,8 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-use super::artwork::{
-    self, Alignment, Canvas, DynamicConfiguration, EditorPreview, EffectsPreview, PrepareConfig,
-};
+use super::artwork::{self, Alignment, Canvas, EditorPreview, EffectsPreview, PrepareConfig};
+use super::configuration::{DesiredEffects, Inputs, Selection};
 use super::device;
 use super::recovery::{self, Binding};
 use crate::i18n::Language;
@@ -41,23 +40,38 @@ struct Draft {
 }
 
 impl Draft {
+    // Legacy drafts are unbound input choices, never verified installed state.
+    // Preserve the old mandatory-parallax meaning until the new workflow lands.
+    fn desired_effects(&self) -> DesiredEffects {
+        DesiredEffects {
+            selection: Selection {
+                parallax: true,
+                cross_dissolve: self.cross_dissolve,
+                particles: self.neutral_particles_enabled,
+                transaction: self.transaction,
+            },
+            inputs: Inputs {
+                background: self.background.clone(),
+                foreground: self.foreground.clone(),
+                alternate_background: self.alternate_background.clone(),
+                particle_sprite: self.particle_sprite.clone(),
+                transaction_sprite: self.transaction_sprite.clone(),
+                transaction_shape: self.transaction_shape.clone(),
+            },
+            static_foreground: false,
+        }
+    }
+
     fn configuration(&self) -> Result<PrepareConfig> {
+        let desired = self.desired_effects();
+        desired.validate_selected_inputs()?;
         Ok(PrepareConfig {
             schema_version: 1,
             parallax_bleed: true,
-            dynamic_layer_configuration: DynamicConfiguration {
-                version: 2,
-                parallax_enabled: true,
-                neutral_emitter: self.neutral_particles_enabled.then_some(
-                    artwork::EmitterConfiguration {
-                        style: artwork::EmitterStyle::Twinkling,
-                        density: artwork::EmitterDensity::Low,
-                        physics_effect: artwork::EmitterPhysics::Off,
-                    },
-                ),
-                cross_dissolve: self.cross_dissolve.then(Default::default),
-                transaction_effect: self.transaction.then(Default::default),
-            },
+            dynamic_layer_configuration: desired
+                .selection
+                .native_configuration()
+                .context("Legacy overlay requires parallax")?,
             background: self
                 .background
                 .clone()
@@ -754,6 +768,50 @@ mod tests {
         assert!(config.emitter_sprite.is_none());
         assert!(config.original_pass_json.as_os_str().is_empty());
         assert!(draft.recovery.is_none());
+    }
+
+    #[test]
+    fn legacy_adapter_preserves_disabled_inputs_and_recovery_links() {
+        let value = serde_json::json!({
+            "background": "background.png", "foreground": "foreground.png",
+            "particle_sprite": "missing-particle.png",
+            "transaction_sprite": "missing-transaction.png",
+            "transaction_shape": "missing-shape.svg",
+            "alternate_background": "missing-alternate.png",
+            "recovery": {
+                "binding": {"udid":"phone", "build":"23G83", "product_type":"iPhone15,4",
+                    "card_id":"card", "transport":"Usb"},
+                "directory":"selected/recovery"
+            },
+            "prior_recovery": {
+                "binding": {"udid":"phone", "build":"23G83", "product_type":"iPhone15,4",
+                    "card_id":"card", "transport":"Usb"},
+                "directory":"previous/recovery"
+            }
+        });
+        let draft: Draft = serde_json::from_value(value.clone()).unwrap();
+        let desired = draft.desired_effects();
+        assert_eq!(
+            desired.selection,
+            Selection {
+                parallax: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(desired.inputs.particle_sprite, draft.particle_sprite);
+        assert_eq!(
+            desired.inputs.alternate_background,
+            draft.alternate_background
+        );
+        let config = draft.configuration().unwrap();
+        assert!(config.dynamic_layer_configuration.parallax_enabled);
+        assert!(config.emitter_sprite.is_none());
+        assert!(config.transaction_sprite.is_none());
+        assert!(config.transaction_shape.is_none());
+        assert!(config.alternate_background.is_none());
+        let saved = serde_json::to_value(draft).unwrap();
+        assert_eq!(saved["recovery"], value["recovery"]);
+        assert_eq!(saved["prior_recovery"], value["prior_recovery"]);
     }
 
     #[test]
