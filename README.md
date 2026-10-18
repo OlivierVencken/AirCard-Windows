@@ -3,6 +3,10 @@
 > **Apple Wallet Card Skinner & Lockscreen Passcode Themer for iOS 18+ (No Jailbreak Required)**  
 > Native Windows client written in Rust. Powered by the `airlift` AirTraffic sync exploit.
 
+This is [OlivierVencken's independently maintained version](https://github.com/OlivierVencken/AirCard-Windows), based on [Lumid-Off's Windows port](https://github.com/Lumid-Off/AirCard-Windows). Development and releases happen in this repository; these changes are no longer being prepared for an upstream merge. The original authors and MIT license are retained.
+
+On 18 October 2026, all current features were operator-confirmed working on the tested **iPhone 15 running iOS 26.6.1**, including parallax, cross-dissolve, particles and transaction effects. This confirmation does not establish compatibility with other devices or iOS builds, every presentation, or persistence after another restart. Experimental labels and recovery requirements remain in place.
+
 ---
 
 ## Compatibility
@@ -23,6 +27,9 @@
 ## Features
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Apple Cash cards.
 - 🪄 **Parallax Card Overlays:** Combine artwork with a transparent overlay for native motion as you tilt your iPhone.
+- 🌗 **Cross-dissolve Backgrounds:** Reveal a second background through native tilt-driven blending, alongside parallax.
+- ✨ **Particles (experimental):** Add a transparent sprite with native twinkling animation.
+- 💳 **Transaction Effects (experimental):** Animate a sprite along an SVG outline during a payment-result presentation.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular Cowabunga & Nugget `.passthm` themes directly to iOS lockscreen.
 - ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~9 MB). No Python, no Flet, no webview, no bloated runtimes.
 - 🪟 **Material Design 3 Interface:** Clean, modern dark theme built with `egui` and `eframe`.
@@ -58,7 +65,7 @@
 ## Installation
 
 ### Pre-built Executable
-1. Download **`aircard.exe`** from [Releases](https://github.com/Lumid-Off/AirCard-Windows/releases).
+1. Download **`aircard.exe`** from this version's [Releases](https://github.com/OlivierVencken/AirCard-Windows/releases). If no release contains the new effects yet, build from source below or download `aircard-windows-x64` from a successful [main branch build](https://github.com/OlivierVencken/AirCard-Windows/actions/workflows/build.yml?query=branch%3Amain) (GitHub sign-in may be required).
 2. Connect your iPhone via USB, unlock it, and tap **"Trust this Computer"** if prompted.
 3. Run **`aircard.exe`**. After WiFi sync is enabled, later sessions can work without the cable.
 
@@ -101,7 +108,7 @@ Use artwork with background margins and keep the overlay subject away from the c
 
 **Cross-dissolve:** With Overlay enabled, select **Cross-dissolve** and **Choose Alternate Background...**. Choose an opaque PNG, JPG or WebP. **Base artwork** and **Alternate artwork** inspect the two compositions; the desktop preview does not simulate the native tilt reveal. The static fallback uses the base artwork. Installation requires recoverable originals for every additional PNG and will refuse missing originals. The alternate background shows at rest; tilting reveals the base artwork while parallax continues.
 
-**Transaction effect (experimental):** With Overlay enabled, select **Transaction effect (experimental)**, then **Particle PNG...** for a visible transparent PNG sprite and **Shape SVG...** for a single-path SVG. This can be combined with cross-dissolve. The small previews inspect the inputs; native playback during payment results has not yet been validated on a phone. The ordinary card preview and static fallback stay unchanged.
+**Transaction effect (experimental):** With Overlay enabled, select **Transaction effect (experimental)**, then **Particle PNG...** for a visible transparent PNG sprite and **Shape SVG...** for a single-path SVG. This can be combined with cross-dissolve and particles. The small previews inspect the inputs; native animation after completing an Apple Pay payment was operator-confirmed on 18 October 2026. The ordinary card preview and static fallback stay unchanged.
 
 The SVG must have positive pixel `width` and `height`, and one direct `<path>` child with only a `d` attribute. An optional `viewBox` must match `0 0 width height`. Flatten groups and transforms before importing; scripts, linked resources, entities and additional elements are rejected. A minimal shape is:
 
@@ -115,13 +122,15 @@ Normal transaction installation requires recoverable originals for the SVG and a
 
 **Explicit transaction trial:** Close AirCard, then run [`try-transaction-experimental.cmd`](try-transaction-experimental.cmd) to launch with the transaction-only missing-originals exception. It permits unknown originals for the three transaction emitter PNGs and shape SVG, and shows an incomplete-recovery warning. Metadata, base artwork and cross-dissolve originals remain mandatory. Restore reapplies known originals but may leave those four transaction files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply anything automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
 
-To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; there is no animation-test button. One GUI trial completed installation and candidate readbacks, but visible transaction animation remains unvalidated.
+To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; there is no animation-test button. Visible animation after a completed payment is confirmed on the tested setup; failure-result playback remains unverified.
 
 **Particles (experimental):** With Overlay enabled, select a transparent PNG with **Choose Particle PNG...**. The native preset uses twinkling, low density and physics off. It can combine with cross-dissolve and transaction effects; the preview stays static. Normal launches require recoverable originals for every overwritten resource.
 
 **Explicit particle trial:** After building the release executable, close AirCard and run [`try-particles-experimental.cmd`](try-particles-experimental.cmd). It permits unknown originals only for `neutralEmitter.png`, `neutralEmitter@2x.png` and `neutralEmitter@3x.png`. Metadata, base, alternate and transaction originals remain required. Restore may leave those three files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
 
 In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
+
+See the [Wallet effects and recovery guide](docs/wallet-effects-guide.md) for the supported workflow and recovery limits.
 
 ---
 
@@ -147,7 +156,7 @@ Prerequisites: [Rust toolchain](https://rustup.rs/) (`stable-x86_64-pc-windows-m
 
 ```powershell
 # Clone the repository
-git clone https://github.com/Lumid-Off/AirCard-Windows.git
+git clone https://github.com/OlivierVencken/AirCard-Windows.git
 cd AirCard-Windows
 
 # Run tests
@@ -159,10 +168,15 @@ cargo build --locked --release
 
 The compiled binary will be in `target\release\aircard.exe`.
 
+## Development
+
+`main` is the integration branch for this version. Use feature or fix branches and target pull requests at **OlivierVencken/AirCard-Windows:main**. A permanent `develop` branch is not needed for the current workflow. See [the development guide](docs/development.md) for validation and release instructions.
+
 ---
 
 ## Contributors
-- **[@Lumid-Off](https://github.com/Lumid-Off)** (Windows Native Rust Port & Maintainer) — [GitHub](https://github.com/Lumid-Off) · [Twitter / X](https://x.com/LumidOff)
+- **[@OlivierVencken](https://github.com/OlivierVencken)** (Maintainer of this version; native Wallet effects)
+- **[@Lumid-Off](https://github.com/Lumid-Off)** (Original Windows Native Rust Port) — [GitHub](https://github.com/Lumid-Off) · [Twitter / X](https://x.com/LumidOff)
 - **[@mak5er](https://github.com/mak5er)** (Original macOS App & Exploit Research) — [GitHub](https://github.com/mak5er) · [Twitter / X](https://x.com/mak5er)
 - **[AirLift](https://github.com/0xjohnnydev/airlift)** by **[0xjohnny (@0xjohnnydev)](https://github.com/0xjohnnydev)**: Original AirTraffic/ATAirlock sandbox escape and proof of concept underlying `AirliftFFI`.
 
@@ -172,7 +186,7 @@ The compiled binary will be in `target\release\aircard.exe`.
 
 ## Support
 
-If you find AirCard useful, you can support future development:
+The following inherited donation addresses support the original Windows project; they are not donation addresses for this version:
 
 - **TON**: `UQB5jbOhep98IvgKjCIsJ1hHGRh2iWkacAZh9jW2DMIVSWZm`
 - **USDT (TRC20)**: `TLiVnkPZ7mVKwCD9RfE28uVTFk6sD6rux2`
