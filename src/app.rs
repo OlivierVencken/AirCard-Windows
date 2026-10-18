@@ -17,9 +17,12 @@ use crate::passthm::{PasscodeTheme, parse_passthm_file};
 use crate::scanner::{SavedCard, load_saved_cards, scan_syslog_for_cards};
 use crate::wallet_backup::backup_exists;
 
+mod effects;
+
 #[derive(PartialEq, Eq)]
 enum AppTab {
     Wallet,
+    Effects,
     Passcode,
     Help,
 }
@@ -65,7 +68,6 @@ fn current_timestamp() -> String {
 
 pub struct AirCardApp {
     overlay_editor: OverlayEditor,
-    overlay_enabled: bool,
     current_tab: AppTab,
     language: Language,
     apple_status: String,
@@ -120,7 +122,6 @@ impl AirCardApp {
         let language = Language::load();
         let mut app = Self {
             overlay_editor: Default::default(),
-            overlay_enabled: false,
             current_tab: AppTab::Wallet,
             language,
             apple_status,
@@ -398,6 +399,7 @@ impl AirCardApp {
     }
 
     fn toggle_syslog_scan(&mut self) {
+        if self.is_busy || self.overlay_editor.busy() { return; }
         if self.scanning_syslog {
             if let Some(flag) = self.scan_stop_flag.take() {
                 flag.store(true, Ordering::Relaxed);
@@ -455,6 +457,7 @@ impl AirCardApp {
     }
 
     fn flash_card(&mut self) {
+        if !self.can_apply_card_skin() { return; }
         if !self.validate_selected_transport("Card flash") {
             return;
         }
@@ -539,6 +542,7 @@ impl AirCardApp {
     }
 
     fn restore_original_card(&mut self) {
+        if self.is_busy || self.scanning_syslog || self.overlay_editor.busy() || self.wallet_effects_blocked() { return; }
         if !self.validate_selected_transport("Restore original card") {
             return;
         }
@@ -696,6 +700,8 @@ impl AirCardApp {
     }
 
     fn flash_theme(&mut self) {
+        if self.is_busy || self.scanning_syslog || self.overlay_editor.busy()
+            || self.selected_udid.as_ref().is_some_and(|udid| self.overlay_editor.device_has_pending_recovery(udid)) { return; }
         if !self.validate_selected_transport("Theme flash") {
             return;
         }
@@ -1114,6 +1120,7 @@ impl eframe::App for AirCardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
         self.overlay_editor.poll(ctx);
+        self.overlay_editor.select_target(self.effects_target());
         let language = self.language;
 
         if self.is_busy || self.scanning_syslog {
@@ -1144,6 +1151,7 @@ impl eframe::App for AirCardApp {
 
                     ui.add_space(20.0);
                     m3_tab(ui, &mut self.current_tab, AppTab::Wallet, language.text("Wallet"));
+                    m3_tab(ui, &mut self.current_tab, AppTab::Effects, language.text("Effects"));
                     m3_tab(ui, &mut self.current_tab, AppTab::Passcode, language.text("Passcode"));
                     m3_tab(ui, &mut self.current_tab, AppTab::Help, language.text("Help"));
 
@@ -1178,7 +1186,7 @@ impl eframe::App for AirCardApp {
                         ui.spinner();
                     }
                     ui.label(
-                        egui::RichText::new(if self.overlay_enabled { self.overlay_editor.status().map(|status| language.text(status)).unwrap_or(&self.status_msg) } else { &self.status_msg })
+                        egui::RichText::new(if self.current_tab == AppTab::Effects || self.overlay_editor.busy() { self.overlay_editor.status().map(|status| language.text(status)).unwrap_or(&self.status_msg) } else { &self.status_msg })
                             .size(11.5)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -1236,16 +1244,19 @@ impl eframe::App for AirCardApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.overlay_editor.busy() && self.current_tab != AppTab::Wallet {
-                        ui.disable();
-                    }
-                    match self.current_tab {
-                        AppTab::Wallet => self.show_wallet_tab(ctx, ui),
-                        AppTab::Passcode => self.show_passcode_tab(ctx, ui),
-                        AppTab::Help => self.show_help_tab(ui),
-                    }
-                });
+                if self.current_tab == AppTab::Effects {
+                    self.show_effects_tab(ctx, ui);
+                } else {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.overlay_editor.busy() || self.is_busy { ui.disable(); }
+                        match self.current_tab {
+                            AppTab::Wallet => self.show_wallet_tab(ctx, ui),
+                            AppTab::Passcode => self.show_passcode_tab(ctx, ui),
+                            AppTab::Help => self.show_help_tab(ui),
+                            AppTab::Effects => unreachable!(),
+                        }
+                    });
+                }
             });
 
         let mut show_logs = self.show_logs_window;
@@ -1422,7 +1433,7 @@ impl AirCardApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if m3_button_filled(ui, language.text("Choose Image...")) { self.select_skin(ctx); }
-                    if self.skin.is_some() && !self.overlay_enabled {
+                    if self.skin.is_some() {
                         if m3_button_tonal(ui, language.text("Export PNG")) { self.save_prepared_png(); }
                     }
                 });
@@ -1436,38 +1447,9 @@ impl AirCardApp {
 
                 ui.add_space(16.0);
 
-                ui.add_enabled_ui(!self.is_busy && !self.scanning_syslog, |ui| {
-                    ui.checkbox(&mut self.overlay_enabled, language.text("Overlay"));
-                    if self.overlay_enabled {
-                        ui.add_space(4.0);
-                        if m3_button_tonal(ui, language.text("Choose Overlay...")) {
-                            self.overlay_editor.choose_overlay();
-                        }
-                        if let Some(path) = self.overlay_editor.overlay_path() {
-                            ui.add(
-                                egui::Label::new(
-                                    path.file_name()
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or("overlay.png"),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(path.display().to_string());
-                        }
-                        ui.small(language.text(
-                            "Choose a transparent PNG overlay. The image above is the background.",
-                        ));
-                        ui.add_space(8.0);
-                        self.overlay_editor.show_cross_dissolve_controls(ui, language);
-                        self.overlay_editor.show_particle_controls(ui, language);
-                        self.overlay_editor.show_transaction_controls(ui, language);
-                    }
-                });
-                if self.overlay_enabled {
-                    self.overlay_editor
-                        .sync_background(self.source_path.clone(), self.crop_focus);
-                    self.overlay_editor
-                        .update_preview(ctx, self.is_busy || self.scanning_syslog || self.crop_dirty);
+                if m3_button_tonal(ui, language.text("Open Effects")) { self.current_tab = AppTab::Effects; }
+                if self.wallet_effects_blocked() {
+                    ui.label(language.text("This card has effects history. Use Effects recovery; ordinary writes need effects removal support."));
                 }
                 ui.add_space(12.0);
 
@@ -1485,10 +1467,6 @@ impl AirCardApp {
                 .min_size(egui::vec2(ui.available_width(), 40.0));
 
                 let resp = ui.add_enabled(can_flash, flash_btn);
-                #[cfg(test)]
-                if self.overlay_enabled && std::env::var_os("AIRCARD_EFFECTS_QA_SCROLL_EFFECTS").is_some() {
-                    ui.scroll_to_rect(resp.rect, Some(egui::Align::BOTTOM));
-                }
                 if resp.clicked() {
                     self.apply_card_skin(ctx);
                 }
@@ -1505,16 +1483,6 @@ impl AirCardApp {
                     if self.skin.is_none() {
                         r.push(language.text("choose image"));
                     }
-                    if self.overlay_enabled {
-                        if self.overlay_binding().is_none() {
-                            r.push(language.text("connect one iPhone by USB"));
-                        }
-                        if self.overlay_editor.overlay_path().is_none() {
-                            r.push(language.text("choose overlay"));
-                        } else if !self.overlay_editor.ready() {
-                            r.push(language.text("wait for a valid overlay preview"));
-                        }
-                    }
                     if !r.is_empty() {
                         resp.on_disabled_hover_text(format!(
                             "{}{}",
@@ -1525,29 +1493,12 @@ impl AirCardApp {
                 }
 
                 ui.add_space(8.0);
-                let can_restore = if self.overlay_enabled {
-                    !self.is_busy
-                        && !self.scanning_syslog
-                        && self
-                            .overlay_binding()
-                            .as_ref()
-                            .is_some_and(|binding| self.overlay_editor.can_restore(binding))
-                } else {
-                    !self.is_busy
-                        && !self.scanning_syslog
-                        && self.selected_transport_available()
-                        && !self.card_hash.trim().is_empty()
-                        && self
-                            .selected_udid
-                            .as_ref()
-                            .is_some_and(|udid| backup_exists(udid, self.card_hash.trim()))
-                };
+                let can_restore = !self.is_busy && !self.overlay_editor.busy()
+                    && !self.scanning_syslog && !self.wallet_effects_blocked()
+                    && self.selected_transport_available() && !self.card_hash.trim().is_empty()
+                    && self.selected_udid.as_ref().is_some_and(|udid| backup_exists(udid, self.card_hash.trim()));
                 let restore_btn = egui::Button::new(
-                    egui::RichText::new(language.text(if self.overlay_enabled {
-                        "Restore previous skin"
-                    } else {
-                        "Restore Original"
-                    }))
+                    egui::RichText::new(language.text("Restore Original"))
                     .strong()
                     .size(13.0)
                     .color(if can_restore {
@@ -1560,27 +1511,11 @@ impl AirCardApp {
                 .corner_radius(20).stroke(egui::Stroke::NONE)
                 .min_size(egui::vec2(ui.available_width(), 36.0));
                 let restore_resp = ui.add_enabled(can_restore, restore_btn);
-                if restore_resp.clicked() {
-                    if self.overlay_enabled {
-                        if let Some(binding) = self.overlay_binding() {
-                            self.overlay_editor.restore(ctx, binding);
-                        }
-                    } else {
-                        self.restore_original_card();
-                    }
-                }
+                if restore_resp.clicked() { self.restore_original_card(); }
                 if !can_restore && !self.card_hash.trim().is_empty() {
-                    restore_resp.on_disabled_hover_text(language.text(if self.overlay_enabled {
-                        "Apply an overlay once to create a recovery backup."
-                    } else {
-                        "Apply a card skin once to create an original backup."
-                    }));
+                    restore_resp.on_disabled_hover_text(language.text("Apply a card skin once to create an original backup."));
                 }
 
-                if self.overlay_enabled {
-                    ui.add_space(8.0);
-                    self.overlay_editor.show_feedback(ctx, ui, language);
-                }
                 if self.is_busy {
                     ui.add_space(8.0);
                     if self.progress_total > 0 {
@@ -1636,23 +1571,8 @@ impl AirCardApp {
                     if response.drag_stopped() && self.crop_dirty {
                         self.rebuild_skin_from_source();
                     }
-                    if self.overlay_enabled {
-                        self.overlay_editor
-                            .sync_background(self.source_path.clone(), self.crop_focus);
-                    }
-
                     let painter = ui.painter();
-                    let overlay_texture = if self.overlay_enabled {
-                        self.overlay_editor.preview_texture()
-                    } else {
-                        None
-                    };
-                    let image = if let Some(texture) = overlay_texture {
-                        Some((
-                            texture,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        ))
-                    } else if let (Some(texture), Some((source_width, source_height))) =
+                    let image = if let (Some(texture), Some((source_width, source_height))) =
                         (self.source_texture.as_ref(), source_dimensions)
                     {
                         let crop_uv = crop_uv_for_card(
@@ -1691,28 +1611,17 @@ impl AirCardApp {
                             language.text("No artwork loaded"), egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
                     }
                 });
-                if self.overlay_enabled {
-                    self.overlay_editor.show_preview_feedback(ui, language);
-                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("1536x969").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
                     ui.label(egui::RichText::new("1.585 ratio").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
-                    if if self.overlay_enabled {
-                        self.overlay_editor.ready()
-                    } else {
-                        self.skin.is_some()
-                    } {
+                    if self.skin.is_some() {
                         ui.label(egui::RichText::new(language.text("Ready")).size(11.0).color(md3::SUCCESS));
                     } else {
                         ui.label(
-                            egui::RichText::new(language.text(if self.overlay_enabled && self.overlay_editor.preview_invalid() {
-                                "Invalid overlay"
-                            } else {
-                                "No image"
-                            }))
+                            egui::RichText::new(language.text("No image"))
                                 .size(11.0)
                                 .color(md3::ON_SURFACE_VARIANT),
                         );
@@ -1823,7 +1732,8 @@ impl AirCardApp {
                 ui.label(egui::RichText::new(language.text("Write to iPhone")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
-                let can_flash = !self.is_busy
+                let can_flash = !self.is_busy && !self.scanning_syslog && !self.overlay_editor.busy()
+                    && !self.selected_udid.as_ref().is_some_and(|udid| self.overlay_editor.device_has_pending_recovery(udid))
                     && self.selected_transport_available()
                     && self.loaded_theme.is_some();
                 let flash_btn = egui::Button::new(
@@ -2016,29 +1926,14 @@ impl AirCardApp {
             })
     }
     fn can_apply_card_skin(&self) -> bool {
-        if self.is_busy || self.overlay_editor.busy() {
-            return false;
-        }
-        if self.overlay_enabled {
-            !self.scanning_syslog && self.overlay_binding().is_some() && self.overlay_editor.ready()
-        } else {
-            self.selected_transport_available()
-                && !self.card_hash.trim().is_empty()
-                && self.skin.is_some()
-        }
+        !self.is_busy && !self.overlay_editor.busy() && !self.scanning_syslog
+            && !self.wallet_effects_blocked() && self.selected_transport_available()
+            && !self.card_hash.trim().is_empty() && self.skin.is_some()
     }
-    fn apply_card_skin(&mut self, ctx: &egui::Context) {
-        if self.overlay_enabled {
-            if !self.is_busy
-                && !self.scanning_syslog
-                && let Some(binding) = self.overlay_binding()
-            {
-                self.overlay_editor.apply(ctx, binding);
-            }
-        } else {
-            self.flash_card();
-        }
+    fn apply_card_skin(&mut self, _ctx: &egui::Context) {
+        if self.can_apply_card_skin() { self.flash_card(); }
     }
+
 }
 #[cfg(test)]
 mod tests {
@@ -2054,59 +1949,58 @@ mod tests {
             stage_started: std::time::Instant,
             requested: bool,
             expect_overlay_valid: bool,
+            foreground: PathBuf,
+        }
+        impl Capture {
+            fn prepare_stage(&mut self) {
+                let state = self.stage / 2;
+                self.app.current_tab = if state == 1 { AppTab::Wallet } else { AppTab::Effects };
+                self.app.selected_udid = if state == 2 { None } else { Some("qa-phone".into()) };
+                self.app.overlay_editor.select_target(self.app.effects_target());
+                self.app.is_busy = state == 4;
+                if state == 4 {
+                    self.app.status_msg = "Backing up current card metadata and artwork…".into();
+                }
+                if self.stage % 2 == 0 && state != 2 {
+                    if state == 5 { self.app.overlay_editor.set_overlay_path(self.foreground.clone()); }
+                    if state == 3 {
+                        let opaque = self.directory.join("qa-opaque.png");
+                        image::RgbaImage::from_pixel(32, 20, image::Rgba([160,160,160,255])).save(&opaque).unwrap();
+                        self.app.overlay_editor.set_overlay_path(opaque);
+                    }
+                    self.app.overlay_editor.qa_state(state, &self.directory);
+                }
+            }
         }
         impl eframe::App for Capture {
             fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-                let screenshot = ctx.input(|input| {
-                    input.events.iter().find_map(|event| {
-                        if let egui::Event::Screenshot { image, .. } = event {
-                            Some(image.clone())
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let screenshot = ctx.input(|input| input.events.iter().find_map(|event| {
+                    if let egui::Event::Screenshot { image, .. } = event { Some(image.clone()) } else { None }
+                }));
                 if let Some(image) = screenshot {
-                    let bytes: Vec<u8> = image
-                        .pixels
-                        .iter()
-                        .flat_map(|pixel| pixel.to_array())
-                        .collect();
-                    image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, bytes)
-                        .unwrap()
-                        .save(self.directory.join(if self.stage == 0 {
-                            "overlay-wide.png"
-                        } else if self.stage == 1 {
-                            "overlay-narrow.png"
-                        } else if self.stage == 2 {
-                            "normal-wide.png"
-                        } else if self.stage == 3 {
-                            "normal-narrow.png"
-                        } else if self.stage == 4 {
-                            "alternate-wide.png"
-                        } else {
-                            "alternate-narrow.png"
-                        }))
-                        .unwrap();
+                    let bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| pixel.to_array()).collect();
+                    let name = ["configured", "wallet", "empty", "invalid", "busy", "success", "recovery", "all-off"][self.stage / 2];
+                    let size = if self.stage % 2 == 0 { "wide" } else { "narrow" };
+                    image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, bytes).unwrap()
+                        .save(self.directory.join(format!("{name}-{size}.png"))).unwrap();
                     self.stage += 1;
+                    if self.stage == 16 { ctx.send_viewport_cmd(egui::ViewportCommand::Close); return; }
                     self.frames = 0;
                     self.stage_started = std::time::Instant::now();
                     self.requested = false;
-                    let cross_qa = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").is_some();
-                    if self.stage == if cross_qa { 6 } else { 4 } {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        return;
-                    }
-                    self.app.overlay_enabled = self.stage < 2 || self.stage >= 4;
-                    if self.stage >= 4 { self.app.overlay_editor.show_alternate_for_qa(); }
+                    self.prepare_stage();
                     let size = if self.stage % 2 == 1 { [880.0, 900.0] } else { [1080.0, 820.0] };
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
                 }
                 self.app.update(ctx, frame);
                 self.frames += 1;
+                let state = self.stage / 2;
                 assert!(self.stage_started.elapsed() < std::time::Duration::from_secs(45), "Preview did not load during native QA");
-                if self.frames > 8 && (if self.app.overlay_enabled { self.app.overlay_editor.preview_ready() } else { self.app.skin.is_some() }) && !self.requested {
-                    assert_eq!(self.app.can_apply_card_skin(), !self.app.overlay_enabled || self.expect_overlay_valid, "Apply must reflect overlay validation");
+                let loaded = matches!(state, 1 | 2 | 4 | 5 | 6) || self.app.overlay_editor.preview_ready();
+                if self.frames > 8 && loaded && !self.app.overlay_editor.busy() && !self.requested {
+                    if matches!(state, 5 | 6) { self.app.overlay_editor.qa_state(state, &self.directory); }
+                    if state == 0 { assert_eq!(self.app.can_apply_effects(), self.expect_overlay_valid); }
+                    if matches!(state, 2 | 3 | 4 | 6 | 7) { assert!(!self.app.can_apply_effects()); }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
                     self.requested = true;
                 }
@@ -2133,8 +2027,16 @@ mod tests {
                 if std::env::var("AIRCARD_EFFECTS_QA_LANGUAGE").as_deref() == Ok("zh") {
                     app.language = Language::SimplifiedChinese;
                 }
-                app.current_tab = AppTab::Wallet;
-                app.overlay_enabled = true;
+                app.current_tab = AppTab::Effects;
+                app.overlay_editor.isolate_qa();
+                // Use a synthetic target to check buttons without device operations
+                app.apple_ready = true;
+                app.devices = vec![DeviceInfo { udid: "qa-phone".into(), name:"QA iPhone".into(),
+                    product_type:"iPhone15,4".into(), ios_version:"26.0".into(), build_version:"23G83".into(), transports:vec![DeviceTransport::Usb] }];
+                app.selected_udid = Some("qa-phone".into());
+                app.card_hash = "OM6NYhwXMZrAw0sRUjR62wmF4ZQ=".into();
+                app.saved_cards.clear();
+                app.overlay_editor.select_target(app.effects_target());
                 let background = std::env::var_os("AIRCARD_EFFECTS_QA_BACKGROUND").map(PathBuf::from).unwrap_or_else(|| directory.join("qa-background.png"));
                 let overlay = std::env::var_os("AIRCARD_EFFECTS_QA_FOREGROUND").map(PathBuf::from).unwrap_or_else(|| directory.join("qa-overlay.png"));
                 if !background.exists() {
@@ -2146,7 +2048,9 @@ mod tests {
                     image.save(&overlay).unwrap();
                 }
                 app.load_skin(&cc.egui_ctx, background);
-                app.overlay_editor.set_overlay_path(overlay);
+                app.overlay_editor.use_wallet_artwork(app.source_path.clone(), app.crop_focus);
+                app.overlay_editor.enable_parallax_for_qa();
+                app.overlay_editor.set_overlay_path(overlay.clone());
                 let alternate = std::env::var_os("AIRCARD_EFFECTS_QA_ALTERNATE").map(PathBuf::from);
                 app.overlay_editor.set_cross_dissolve(alternate.is_some());
                 if let Some(path) = alternate { app.overlay_editor.set_alternate_background(path); }
@@ -2164,13 +2068,6 @@ mod tests {
                     app.overlay_editor.set_transaction_sprite(sprite);
                     app.overlay_editor.set_transaction_shape(shape);
                 }
-                // Use a synthetic target to check buttons without device operations
-                app.apple_ready = true;
-                app.devices = vec![DeviceInfo { udid: "qa-phone".into(), name:"QA iPhone".into(),
-                    product_type:"iPhone15,4".into(), ios_version:"26.0".into(), build_version:"23G83".into(), transports:vec![DeviceTransport::Usb] }];
-                app.selected_udid = Some("qa-phone".into());
-                app.card_hash = "OM6NYhwXMZrAw0sRUjR62wmF4ZQ=".into();
-                app.saved_cards.clear();
                 Ok(Box::new(Capture {
                     app,
                     directory,
@@ -2179,6 +2076,7 @@ mod tests {
                     stage_started: std::time::Instant::now(),
                     requested: false,
                     expect_overlay_valid: std::env::var_os("AIRCARD_EFFECTS_QA_EXPECT_INVALID_OVERLAY").is_none(),
+                    foreground: overlay,
                 }))
             }),
         )

@@ -22,9 +22,11 @@ struct Recovery {
 }
 
 // Ignore obsolete developer settings when loading older drafts
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Draft {
+    // None is the historical mandatory-parallax draft interpretation.
+    parallax: Option<bool>,
     background: Option<PathBuf>,
     foreground: Option<PathBuf>,
     alignment: Alignment,
@@ -37,6 +39,55 @@ struct Draft {
     transaction_shape: Option<PathBuf>,
     neutral_particles_enabled: bool,
     particle_sprite: Option<PathBuf>,
+    last_applied: Option<Selection>,
+    managed_history: bool,
+    last_error: Option<String>,
+    last_status: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CardDraft {
+    binding: Binding,
+    draft: Draft,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftLibrary {
+    schema_version: u32,
+    legacy: Draft,
+    cards: Vec<CardDraft>,
+}
+
+impl DraftLibrary {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == 1,
+            "Unsupported effects draft library"
+        );
+        for (index, card) in self.cards.iter().enumerate() {
+            card.binding.validate()?;
+            anyhow::ensure!(
+                !self.cards[..index]
+                    .iter()
+                    .any(|previous| previous.binding == card.binding),
+                "Duplicate effects draft target"
+            );
+            for recovery in card
+                .draft
+                .recovery
+                .iter()
+                .chain(card.draft.prior_recovery.iter())
+            {
+                anyhow::ensure!(
+                    recovery.binding == card.binding,
+                    "Effects recovery target does not match its draft"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Draft {
@@ -45,7 +96,7 @@ impl Draft {
     fn desired_effects(&self) -> DesiredEffects {
         DesiredEffects {
             selection: Selection {
-                parallax: true,
+                parallax: self.parallax.unwrap_or(true),
                 cross_dissolve: self.cross_dissolve,
                 particles: self.neutral_particles_enabled,
                 transaction: self.transaction,
@@ -64,6 +115,10 @@ impl Draft {
 
     fn configuration(&self) -> Result<PrepareConfig> {
         let desired = self.desired_effects();
+        anyhow::ensure!(
+            desired.selection.parallax,
+            "Standalone effects and turning effects off need transition support before applying."
+        );
         desired.validate_selected_inputs()?;
         Ok(PrepareConfig {
             schema_version: 1,
@@ -136,6 +191,12 @@ enum Message {
 
 pub(crate) struct OverlayEditor {
     draft: Draft,
+    legacy: Draft,
+    cards: Vec<CardDraft>,
+    target: Option<Binding>,
+    storage_error: Option<String>,
+    persist: bool,
+    storage_path: PathBuf,
     preview_texture: Option<egui::TextureHandle>,
     alternate_texture: Option<egui::TextureHandle>,
     transaction_texture: Option<egui::TextureHandle>,
@@ -164,8 +225,37 @@ impl Default for OverlayEditor {
         {
             draft.recovery = draft.prior_recovery.take();
         }
+        let library = match recovery::regular_read(&library_path(), 1024 * 1024) {
+            Ok(bytes) => super::metadata::parse_unique(&bytes)
+                .and_then(|value| Ok(serde_json::from_value::<DraftLibrary>(value)?))
+                .and_then(|library| {
+                    library.validate()?;
+                    Ok(library)
+                })
+                .map(Some),
+            Err(error) if !library_path().exists() => {
+                let _ = error;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        };
+        let (legacy, cards, storage_error) = match library {
+            Ok(Some(library)) => (library.legacy, library.cards, None),
+            Ok(None) => (draft.clone(), Vec::new(), None),
+            Err(error) => (
+                draft.clone(),
+                Vec::new(),
+                Some(format!("Could not load effects drafts: {error:#}")),
+            ),
+        };
         Self {
-            draft,
+            draft: legacy.clone(),
+            legacy,
+            cards,
+            target: None,
+            storage_error,
+            persist: true,
+            storage_path: library_path(),
             preview_texture: None,
             alternate_texture: None,
             transaction_texture: None,
@@ -187,14 +277,402 @@ fn draft_path() -> PathBuf {
         .join("effects-editor.json")
 }
 
+fn library_path() -> PathBuf {
+    draft_path().with_file_name("effects-drafts.json")
+}
+
+fn recovery_pending(recovery: &Recovery) -> bool {
+    if recovery.directory.is_dir() && device::no_installation_to_recover(&recovery.directory) {
+        return false;
+    }
+    super::recovery::load(&recovery.directory)
+        .map(|journal| {
+            journal.binding != recovery.binding
+                || !journal.roots.is_empty()
+                || journal.status != "ParallaxCandidateReadbackMatchedAwaitingManualObservation"
+        })
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 pub(super) fn remember_trial_recovery(binding: Binding, directory: PathBuf) -> Result<()> {
     let mut editor = OverlayEditor::default();
+    editor.select_target(Some(binding.clone()));
     editor.draft.recovery = Some(Recovery { binding, directory });
     editor.remember()
 }
 
 impl OverlayEditor {
+    pub fn select_target(&mut self, target: Option<Binding>) {
+        if self.busy() || self.target == target {
+            return;
+        }
+        if let Some(binding) = &target
+            && let Err(error) = binding.validate()
+        {
+            self.error = Some(format!("Invalid effects target: {error:#}"));
+            return;
+        }
+        if self.storage_error.is_none()
+            && let Err(error) = self.remember()
+        {
+            self.storage_error = Some(format!("Could not save effects drafts: {error:#}"));
+        }
+        let mut previous = self.draft.clone();
+        previous.last_error = self.error.clone();
+        previous.last_status = self.status.clone();
+        if let Some(binding) = &self.target {
+            self.cards.retain(|card| card.binding != *binding);
+            self.cards.push(CardDraft {
+                binding: binding.clone(),
+                draft: previous,
+            });
+        } else {
+            self.legacy = previous;
+        }
+        self.draft = target
+            .as_ref()
+            .and_then(|binding| {
+                self.cards
+                    .iter()
+                    .find(|card| card.binding == *binding)
+                    .map(|card| card.draft.clone())
+            })
+            .unwrap_or_else(|| {
+                if target.is_none() {
+                    return self.legacy.clone();
+                }
+                let mut draft = Draft {
+                    parallax: Some(false),
+                    ..Default::default()
+                };
+                // Recovery is already bound evidence. Unbound image choices need
+                // an explicit import even when that recovery matches this target.
+                if let Some(binding) = &target {
+                    draft.recovery = self
+                        .legacy
+                        .recovery
+                        .clone()
+                        .filter(|r| r.binding == *binding);
+                    draft.prior_recovery = self
+                        .legacy
+                        .prior_recovery
+                        .clone()
+                        .filter(|r| r.binding == *binding);
+                    draft.managed_history = draft.recovery.is_some();
+                }
+                draft
+            });
+        self.target = target;
+        if self.draft.prior_recovery.is_some()
+            && self
+                .draft
+                .recovery
+                .as_ref()
+                .is_some_and(|r| device::no_installation_to_recover(&r.directory))
+        {
+            self.draft.recovery = self.draft.prior_recovery.take();
+        }
+        self.invalidate_preview();
+        self.show_alternate = false;
+        self.error = self.draft.last_error.clone();
+        self.status = self.draft.last_status.clone();
+    }
+
+    pub fn matches_target(&self, binding: &Binding) -> bool {
+        self.target.as_ref() == Some(binding)
+    }
+
+    pub fn blocks_wallet(&self, udid: &str, card_id: &str) -> bool {
+        if self.storage_error.is_some() {
+            return true;
+        }
+        let matches = |draft: &Draft| {
+            draft
+                .recovery
+                .iter()
+                .chain(draft.prior_recovery.iter())
+                .any(|r| r.binding.udid == udid && r.binding.card_id == card_id)
+        };
+        matches(&self.legacy)
+            || matches(&self.draft)
+            || self.cards.iter().any(|card| {
+                card.binding.udid == udid
+                    && card.binding.card_id == card_id
+                    && (card.draft.managed_history || matches(&card.draft))
+            })
+            || (self.draft.managed_history
+                && self
+                    .target
+                    .as_ref()
+                    .is_some_and(|binding| binding.udid == udid && binding.card_id == card_id))
+    }
+
+    pub fn apply_issue(&self) -> Option<&str> {
+        if let Some(error) = &self.storage_error {
+            return Some(error);
+        }
+        if self.target.is_none() {
+            return Some("Select a card and device in Wallet first.");
+        }
+        if self.recovery_pending() {
+            return Some("Recover the interrupted operation before applying again.");
+        }
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|binding| self.device_has_pending_recovery(&binding.udid))
+        {
+            return Some("Another card on this device needs recovery. Select that card in Wallet.");
+        }
+        let desired = self.draft.desired_effects().selection;
+        if self.draft.last_applied.is_some_and(|applied| {
+            (applied.parallax && !desired.parallax)
+                || (applied.cross_dissolve && !desired.cross_dissolve)
+                || (applied.particles && !desired.particles)
+                || (applied.transaction && !desired.transaction)
+        }) {
+            return Some("Removing effects needs transition support. Undo remains available.");
+        }
+        if !self.draft.desired_effects().selection.parallax {
+            return Some(
+                "Standalone effects and turning effects off need transition support before applying.",
+            );
+        }
+        if self.draft.background.is_none() {
+            return Some("Choose a background image");
+        }
+        if self.draft.foreground.is_none() {
+            return Some("Choose a transparent overlay PNG");
+        }
+        if self.draft.cross_dissolve && self.draft.alternate_background.is_none() {
+            return Some("Choose an alternate background image for cross-dissolve");
+        }
+        if self.draft.neutral_particles_enabled && self.draft.particle_sprite.is_none() {
+            return Some("Choose a transparent particle PNG");
+        }
+        if self.draft.transaction
+            && (self.draft.transaction_sprite.is_none() || self.draft.transaction_shape.is_none())
+        {
+            return Some("Choose a transaction particle PNG and shape SVG");
+        }
+        if !self.ready() {
+            return Some("Wait for a valid static preview before applying.");
+        }
+        None
+    }
+
+    pub fn all_effects_off(&self) -> bool {
+        self.draft.desired_effects().selection.is_empty()
+    }
+
+    pub fn recovery_pending(&self) -> bool {
+        self.draft.recovery.as_ref().is_some_and(recovery_pending)
+    }
+
+    pub fn device_has_pending_recovery(&self, udid: &str) -> bool {
+        if self.storage_error.is_some() {
+            return true;
+        }
+        let pending = |draft: &Draft| {
+            draft
+                .recovery
+                .as_ref()
+                .is_some_and(|r| r.binding.udid == udid && recovery_pending(r))
+        };
+        let legacy_unmigrated = self.legacy.recovery.as_ref().is_some_and(|r| {
+            self.target.as_ref() != Some(&r.binding)
+                && !self.cards.iter().any(|card| card.binding == r.binding)
+        });
+        pending(&self.draft)
+            || (legacy_unmigrated && pending(&self.legacy))
+            || self
+                .cards
+                .iter()
+                .filter(|card| self.target.as_ref() != Some(&card.binding))
+                .any(|card| pending(&card.draft))
+    }
+
+    pub fn show_inputs(&mut self, ui: &mut egui::Ui, language: Language) {
+        if self.legacy.background.is_some() || self.legacy.foreground.is_some() {
+            ui.small(
+                language.text("Legacy inputs are unbound. Import them explicitly for this card."),
+            );
+            if ui
+                .button(language.text("Use legacy inputs for this card"))
+                .clicked()
+            {
+                self.import_legacy_inputs();
+                self.changed();
+            }
+            ui.add_space(8.0);
+        }
+        ui.label(language.text("Base artwork"));
+        if ui.button(language.text("Choose background...")).clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+                .pick_file()
+        {
+            self.draft.background = Some(path);
+            self.changed();
+        }
+        if let Some(path) = &self.draft.background {
+            ui.add(
+                egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate(),
+            )
+            .on_hover_text(path.display().to_string());
+        }
+        ui.small(language.text("Effects artwork and crop are saved separately from Wallet."));
+        let mut x = self.draft.alignment.focus_x;
+        let mut y = self.draft.alignment.focus_y;
+        let changed = ui
+            .add(egui::Slider::new(&mut x, 0.0..=1.0).text(language.text("Crop X")))
+            .changed()
+            | ui.add(egui::Slider::new(&mut y, 0.0..=1.0).text(language.text("Crop Y")))
+                .changed();
+        if changed {
+            self.draft.alignment = Alignment {
+                focus_x: x,
+                focus_y: y,
+            };
+            self.changed();
+        }
+        ui.add_space(12.0);
+        let mut parallax = self.draft.parallax.unwrap_or(true);
+        if ui
+            .checkbox(&mut parallax, language.text("Parallax"))
+            .changed()
+        {
+            self.draft.parallax = Some(parallax);
+            self.changed();
+        }
+        if parallax {
+            if ui.button(language.text("Choose Overlay...")).clicked() {
+                self.choose_overlay();
+            }
+            if let Some(path) = self.overlay_path() {
+                ui.add(
+                    egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy())
+                        .truncate(),
+                )
+                .on_hover_text(path.display().to_string());
+            }
+        }
+        self.show_cross_dissolve_controls(ui, language);
+        self.show_particle_controls(ui, language);
+        self.show_transaction_controls(ui, language);
+        ui.add_space(8.0);
+        if let Some(applied) = self.draft.last_applied {
+            ui.label(language.text("Last verified apply (device not rechecked)"));
+            for (name, before, after) in [
+                ("Parallax", applied.parallax, parallax),
+                (
+                    "Cross-dissolve",
+                    applied.cross_dissolve,
+                    self.draft.cross_dissolve,
+                ),
+                (
+                    "Particles (experimental)",
+                    applied.particles,
+                    self.draft.neutral_particles_enabled,
+                ),
+                (
+                    "Transaction effect (experimental)",
+                    applied.transaction,
+                    self.draft.transaction,
+                ),
+            ] {
+                ui.small(format!(
+                    "{}: {}",
+                    language.text(name),
+                    language.text(match (before, after) {
+                        (true, true) => "Keep",
+                        (false, true) => "Add",
+                        (true, false) => "Remove",
+                        _ => "Off",
+                    })
+                ));
+            }
+        } else {
+            ui.small(language.text(
+                "Installed effects have not been checked. Apply verifies captured metadata.",
+            ));
+        }
+    }
+
+    fn import_legacy_inputs(&mut self) {
+        let recovery = self.draft.recovery.clone();
+        let prior = self.draft.prior_recovery.clone();
+        let history = self.draft.managed_history;
+        let last_applied = self.draft.last_applied;
+        self.draft = self.legacy.clone();
+        self.draft.recovery = recovery;
+        self.draft.prior_recovery = prior;
+        self.draft.managed_history = history;
+        self.draft.last_applied = last_applied;
+    }
+
+    fn changed(&mut self) {
+        self.invalidate_preview();
+        if let Err(error) = self.remember() {
+            self.error = Some(format!("Could not save effects drafts: {error:#}"));
+        }
+    }
+
+    pub fn use_wallet_artwork(&mut self, path: Option<PathBuf>, focus: [f32; 2]) {
+        self.sync_background(path, focus);
+        if let Err(error) = self.remember() {
+            self.error = Some(format!("Could not save effects drafts: {error:#}"));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn isolate_qa(&mut self) {
+        self.persist = false;
+        self.storage_error = None;
+        self.cards.clear();
+        self.legacy = Draft::default();
+        self.draft = Draft::default();
+        self.target = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_parallax_for_qa(&mut self) {
+        self.draft.parallax = Some(true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn qa_state(&mut self, state: usize, directory: &Path) {
+        self.draft.recovery = None;
+        self.draft.last_applied = None;
+        self.error = None;
+        self.status = None;
+        if state == 5 {
+            self.status = Some(
+                "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change."
+                    .into(),
+            );
+            self.draft.last_applied = Some(self.draft.desired_effects().selection);
+        }
+        if state == 6 {
+            let recovery = directory.join("illustrative-recovery");
+            std::fs::create_dir_all(&recovery).unwrap();
+            std::fs::write(recovery.join("journal.json"), b"{}").unwrap();
+            self.draft.recovery = Some(Recovery {
+                binding: self.target.clone().unwrap(),
+                directory: recovery,
+            });
+            self.error = Some("Recover the interrupted operation before applying again.".into());
+        }
+        if state == 7 {
+            self.draft.parallax = Some(false);
+            self.draft.cross_dissolve = false;
+            self.draft.neutral_particles_enabled = false;
+            self.draft.transaction = false;
+            self.dirty = true;
+        }
+    }
+
     pub fn busy(&self) -> bool {
         self.receiver.is_some()
     }
@@ -211,11 +689,43 @@ impl OverlayEditor {
     }
 
     fn remember(&self) -> Result<()> {
-        let path = draft_path();
+        if !self.persist {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.storage_error.is_none(),
+            "Effects draft storage needs repair before saving"
+        );
+        let path = self.storage_path.clone();
+        let mut cards = self.cards.clone();
+        let mut draft = self.draft.clone();
+        draft.last_error = self.error.clone();
+        draft.last_status = self.status.clone();
+        let mut legacy = self.legacy.clone();
+        if let Some(binding) = &self.target {
+            cards.retain(|card| card.binding != *binding);
+            cards.push(CardDraft {
+                binding: binding.clone(),
+                draft,
+            });
+        } else {
+            legacy = draft;
+        }
+        let library = DraftLibrary {
+            schema_version: 1,
+            legacy,
+            cards,
+        };
+        library.validate()?;
+        let bytes = serde_json::to_vec_pretty(&library)?;
+        anyhow::ensure!(
+            bytes.len() <= 1024 * 1024,
+            "Effects draft library exceeds 1 MiB"
+        );
         std::fs::create_dir_all(path.parent().unwrap())?;
         let temporary = path.with_extension("tmp");
         let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&serde_json::to_vec_pretty(&self.draft)?)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         recovery::durable_replace(&temporary, &path)
     }
@@ -267,6 +777,8 @@ impl OverlayEditor {
                         }
                         Ok(Completed::Applied(limited)) => {
                             self.draft.prior_recovery = None;
+                            self.draft.managed_history = true;
+                            self.draft.last_applied = Some(self.draft.desired_effects().selection);
                             if let Err(error) = self.remember() {
                                 self.error =
                                     Some(format!("Could not save overlay settings: {error:#}"));
@@ -276,6 +788,7 @@ impl OverlayEditor {
                             } else { "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." }.into());
                         }
                         Ok(Completed::Restored(limited)) => {
+                            self.draft.last_applied = None;
                             self.status = Some(if limited {
                                 "Known originals restored and verified. Recovery is incomplete: effect files may remain. Reopen Wallet and Apple Pay and check appearance."
                             } else { "Previous skin restored. Force-close and reopen Wallet and Apple Pay." }.into());
@@ -302,8 +815,22 @@ impl OverlayEditor {
                                 }
                             }
                             self.status = None;
+                            if self.draft.prior_recovery.is_none()
+                                && self
+                                    .draft
+                                    .recovery
+                                    .as_ref()
+                                    .is_some_and(|r| !r.directory.exists())
+                            {
+                                self.draft.recovery = None;
+                            }
                             self.error = Some(error);
                         }
+                    }
+                    if self.target.is_some()
+                        && let Err(error) = self.remember()
+                    {
+                        self.error = Some(format!("Could not save effects drafts: {error:#}"));
                     }
                     break;
                 }
@@ -581,7 +1108,11 @@ impl OverlayEditor {
             if device::experimental_transaction_enabled() {
                 ui.colored_label(ui.visuals().warn_fg_color, language.text("Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind."));
             }
-            ui.small(language.text("An expanding particle outline during payment results. Phone playback is not yet validated."));
+            ui.small(
+                language.text(
+                    "An expanding particle outline during payment results. Preview is static.",
+                ),
+            );
             ui.horizontal(|ui| {
                 let has_preview = self.transaction_texture.is_some() && self.transaction_outline.is_some();
                 let picker_width = (ui.available_width() - if has_preview { 108.0 } else { 0.0 }).max(160.0);
@@ -628,18 +1159,27 @@ impl OverlayEditor {
     }
 
     pub fn update_preview(&mut self, ctx: &egui::Context, device_busy: bool) {
-        if self.dirty
-            && !self.busy()
-            && !device_busy
-            && let Ok(config) = self.draft.configuration()
-        {
+        if self.dirty && !self.busy() && !device_busy {
+            let desired = self.draft.desired_effects();
+            if desired.validate_selected_inputs().is_err() || self.draft.background.is_none() {
+                return;
+            }
+            let alignment = self.draft.alignment.clone();
+            let config = if desired.selection.parallax {
+                match self.draft.configuration() {
+                    Ok(config) => Some(config),
+                    Err(_) => return,
+                }
+            } else {
+                None
+            };
             self.dirty = false;
             self.start(ctx, move |progress| {
                 progress("Loading overlay preview…");
-                Ok(Completed::Preview(Box::new(artwork::preview_for_editor(
-                    &config,
-                    Path::new("."),
-                )?)))
+                Ok(Completed::Preview(Box::new(match config {
+                    Some(config) => artwork::preview_for_editor(&config, Path::new("."))?,
+                    None => artwork::preview_static_draft(&desired, &alignment)?,
+                })))
             });
         }
     }
@@ -651,12 +1191,8 @@ impl OverlayEditor {
             && self.preview_issue.is_none()
     }
 
-    pub fn preview_invalid(&self) -> bool {
-        self.preview_issue.is_some()
-    }
-
     pub fn apply(&mut self, ctx: &egui::Context, binding: Binding) {
-        if !self.ready() {
+        if !self.matches_target(&binding) || self.apply_issue().is_some() {
             return;
         }
         let result = (|| -> Result<_> {
@@ -693,6 +1229,7 @@ impl OverlayEditor {
 
     pub fn can_restore(&self, binding: &Binding) -> bool {
         !self.busy()
+            && self.matches_target(binding)
             && self.draft.recovery.as_ref().is_some_and(|recovery| {
                 recovery.binding == *binding && recovery.directory.join("journal.json").is_file()
             })
@@ -756,6 +1293,149 @@ impl OverlayEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(card: &str) -> Binding {
+        Binding {
+            udid: "draft-test-phone".into(),
+            build: "23G83".into(),
+            product_type: "iPhone15,4".into(),
+            card_id: card.into(),
+            transport: crate::device::DeviceTransport::Usb,
+        }
+    }
+
+    fn isolated_editor() -> OverlayEditor {
+        let mut editor = OverlayEditor::default();
+        editor.isolate_qa();
+        editor
+    }
+
+    #[test]
+    fn card_drafts_survive_switch_restart_and_build_changes_without_inheriting_inputs() {
+        let mut editor = isolated_editor();
+        let directory =
+            std::env::temp_dir().join(format!("aircard-draft-switch-{}", std::process::id()));
+        editor.storage_path = directory.join("effects-drafts.json");
+        editor.persist = true;
+        editor.select_target(Some(target("card-a")));
+        editor.draft.parallax = Some(true);
+        editor.draft.foreground = Some("card-a.png".into());
+        editor.use_wallet_artwork(Some("base-a.png".into()), [0.25, 0.75]);
+        editor.error = Some("retained error".into());
+        editor.select_target(Some(target("card-b")));
+        assert!(editor.draft.background.is_none() && editor.draft.foreground.is_none());
+        assert!(editor.all_effects_off());
+        editor.use_wallet_artwork(Some("base-b.png".into()), [0.5, 0.5]);
+        editor.select_target(Some(target("card-a")));
+        assert_eq!(
+            editor.draft.background.as_deref(),
+            Some(Path::new("base-a.png"))
+        );
+        assert_eq!(
+            editor.draft.foreground.as_deref(),
+            Some(Path::new("card-a.png"))
+        );
+        assert_eq!(editor.draft.alignment.focus_x, 0.25);
+        assert_eq!(editor.error.as_deref(), Some("retained error"));
+        editor.remember().unwrap();
+        let library: DraftLibrary = serde_json::from_value(
+            super::super::metadata::parse_unique(&std::fs::read(&editor.storage_path).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        library.validate().unwrap();
+        let mut restarted = isolated_editor();
+        restarted.legacy = library.legacy;
+        restarted.cards = library.cards;
+        restarted.select_target(Some(target("card-a")));
+        assert_eq!(restarted.draft.foreground, editor.draft.foreground);
+        assert_eq!(restarted.error, editor.error);
+        let mut other_build = target("card-a");
+        other_build.build = "23G84".into();
+        restarted.select_target(Some(other_build));
+        assert!(restarted.draft.foreground.is_none());
+        std::fs::remove_file(&editor.storage_path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_inputs_need_explicit_import_and_never_copy_another_cards_recovery() {
+        let mut editor = isolated_editor();
+        editor.legacy = Draft {
+            foreground: Some("legacy.png".into()),
+            recovery: Some(Recovery {
+                binding: target("card-a"),
+                directory: "prior/recovery".into(),
+            }),
+            ..Default::default()
+        };
+        editor.draft = editor.legacy.clone();
+        editor.select_target(Some(target("card-b")));
+        assert!(editor.draft.foreground.is_none() && editor.draft.recovery.is_none());
+        editor.import_legacy_inputs();
+        assert_eq!(editor.overlay_path(), Some(Path::new("legacy.png")));
+        assert!(editor.draft.recovery.is_none());
+        editor.select_target(Some(target("card-a")));
+        assert!(editor.draft.foreground.is_none());
+        assert_eq!(
+            editor.draft.recovery.as_ref().unwrap().binding,
+            target("card-a")
+        );
+        assert!(editor.blocks_wallet("draft-test-phone", "card-a"));
+    }
+
+    #[test]
+    fn invalid_inputs_and_broken_draft_storage_do_not_hide_bound_recovery() {
+        let mut editor = isolated_editor();
+        let directory =
+            std::env::temp_dir().join(format!("aircard-recovery-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        // Deliberately corrupt local journal: recovery must remain discoverable;
+        // its executor will reject it before opening any device session.
+        std::fs::write(directory.join("journal.json"), b"{}").unwrap();
+        editor.legacy.recovery = Some(Recovery {
+            binding: target("card-a"),
+            directory: directory.clone(),
+        });
+        editor.draft = editor.legacy.clone();
+        editor.storage_error = Some("corrupt library".into());
+        editor.select_target(Some(target("card-a")));
+        assert!(editor.can_restore(&target("card-a")));
+        assert!(!editor.can_restore(&target("card-b")));
+        assert!(editor.recovery_pending() && editor.apply_issue().is_some());
+        editor.storage_error = None;
+        editor.select_target(Some(target("card-b")));
+        assert!(editor.device_has_pending_recovery("draft-test-phone"));
+        assert!(editor.apply_issue().unwrap().contains("Another card"));
+        std::fs::remove_file(directory.join("journal.json")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn busy_editor_keeps_operation_target_and_library_rejects_conflicting_bindings() {
+        let mut editor = isolated_editor();
+        editor.select_target(Some(target("card-a")));
+        let (_sender, receiver) = channel();
+        editor.receiver = Some(receiver);
+        editor.select_target(Some(target("card-b")));
+        assert!(editor.matches_target(&target("card-a")));
+        let card = CardDraft {
+            binding: target("card-a"),
+            draft: Draft::default(),
+        };
+        let mut library = DraftLibrary {
+            schema_version: 1,
+            legacy: Draft::default(),
+            cards: vec![card.clone(), card],
+        };
+        assert!(library.validate().is_err());
+        library.cards.pop();
+        library.cards[0].draft.recovery = Some(Recovery {
+            binding: target("card-b"),
+            directory: "wrong/recovery".into(),
+        });
+        assert!(library.validate().is_err());
+    }
 
     #[test]
     fn old_draft_migrates_without_requiring_metadata_or_particles() {

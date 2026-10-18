@@ -424,38 +424,34 @@ fn aligned_layers(
     if !allow_invalid_overlay && let Some(issue) = overlay_issue(&foreground, false) {
         anyhow::bail!(issue);
     }
-    // Use the same crop focus and card canvas for both layers
-    let transform = |layer: &RgbaImage| -> Result<RgbaImage> {
-        let (width, height) = layer.dimensions();
-        check_dimensions(width, height)?;
-        let target_ratio = config.canvas.width as f64 / config.canvas.height as f64;
-        let (crop_width, crop_height) = if width as f64 / height as f64 > target_ratio {
-            (
-                ((height as f64 * target_ratio).round() as u32).clamp(1, width),
-                height,
-            )
-        } else {
-            (
-                width,
-                ((width as f64 / target_ratio).round() as u32).clamp(1, height),
-            )
-        };
-        let x = (config.alignment.focus_x * (width - crop_width) as f64).round() as u32;
-        let y = (config.alignment.focus_y * (height - crop_height) as f64).round() as u32;
-        let cropped = image::imageops::crop_imm(layer, x, y, crop_width, crop_height).to_image();
-        Ok(resize_rgba(
-            &cropped,
-            config.canvas.width,
-            config.canvas.height,
-        ))
-    };
-    let background = transform(&background)?;
-    let foreground = transform(&foreground)?;
+    let background = crop_layer(&background, &config.canvas, &config.alignment)?;
+    let foreground = crop_layer(&foreground, &config.canvas, &config.alignment)?;
     if !allow_invalid_overlay && let Some(issue) = overlay_issue(&foreground, true) {
         anyhow::bail!(issue);
     }
     let fallback = composite(&background, &foreground);
     Ok((background, foreground, fallback))
+}
+
+fn crop_layer(layer: &RgbaImage, canvas: &Canvas, alignment: &Alignment) -> Result<RgbaImage> {
+    let (width, height) = layer.dimensions();
+    check_dimensions(width, height)?;
+    let target_ratio = canvas.width as f64 / canvas.height as f64;
+    let (crop_width, crop_height) = if width as f64 / height as f64 > target_ratio {
+        (
+            ((height as f64 * target_ratio).round() as u32).clamp(1, width),
+            height,
+        )
+    } else {
+        (
+            width,
+            ((width as f64 / target_ratio).round() as u32).clamp(1, height),
+        )
+    };
+    let x = (alignment.focus_x * (width - crop_width) as f64).round() as u32;
+    let y = (alignment.focus_y * (height - crop_height) as f64).round() as u32;
+    let cropped = image::imageops::crop_imm(layer, x, y, crop_width, crop_height).to_image();
+    Ok(resize_rgba(&cropped, canvas.width, canvas.height))
 }
 
 /// slide magnitude is (round(size * 1.1) - size) / 2,
@@ -628,6 +624,86 @@ pub fn preview(config: &PrepareConfig, base: &Path) -> Result<EffectsPreview> {
 /// Pack preparation continues to use the strict `preview` entry point.
 pub fn preview_for_editor(config: &PrepareConfig, base: &Path) -> Result<EditorPreview> {
     preview_internal(config, base, true)
+}
+
+/// Desktop-only artwork inspection for drafts that cannot yet be installed.
+/// No transparent support resource is generated or exported to a native pack.
+pub(super) fn preview_static_draft(
+    desired: &super::configuration::DesiredEffects,
+    alignment: &Alignment,
+) -> Result<EditorPreview> {
+    ensure!(
+        !desired.selection.parallax,
+        "Use the native parallax preview path"
+    );
+    desired.validate_selected_inputs()?;
+    for focus in [alignment.focus_x, alignment.focus_y] {
+        ensure!(
+            focus.is_finite() && (0.0..=1.0).contains(&focus),
+            "Invalid crop focus"
+        );
+    }
+    let canvas = Canvas::default();
+    let read_background = |path: &Path| -> Result<RgbaImage> {
+        let image = decode_background(&read_bounded(path, MAX_IMAGE_BYTES)?)?;
+        ensure!(
+            image.pixels().all(|pixel| pixel[3] == 255),
+            "Background must be opaque"
+        );
+        crop_layer(&image, &canvas, alignment)
+    };
+    let background = read_background(
+        desired
+            .inputs
+            .background
+            .as_deref()
+            .context("Choose a background image")?,
+    )?;
+    let read_sprite =
+        |path: &Path| prepare_sprite(decode_png(&read_bounded(path, MAX_IMAGE_BYTES)?)?);
+    let sprite = if desired.selection.particles {
+        Some(read_sprite(
+            desired.inputs.particle_sprite.as_deref().unwrap(),
+        )?)
+    } else {
+        None
+    };
+    let alternate_background = if desired.selection.cross_dissolve {
+        Some(read_background(
+            desired.inputs.alternate_background.as_deref().unwrap(),
+        )?)
+    } else {
+        None
+    };
+    let transaction_sprite = if desired.selection.transaction {
+        Some(read_sprite(
+            desired.inputs.transaction_sprite.as_deref().unwrap(),
+        )?)
+    } else {
+        None
+    };
+    let transaction_shape = if desired.selection.transaction {
+        let bytes = read_bounded(
+            desired.inputs.transaction_shape.as_deref().unwrap(),
+            super::transaction::MAX_SVG_BYTES,
+        )?;
+        super::transaction::validate(&bytes)?;
+        Some(bytes)
+    } else {
+        None
+    };
+    Ok(EditorPreview {
+        artwork: EffectsPreview {
+            fallback: background.clone(),
+            background,
+            foreground: RgbaImage::new(canvas.width, canvas.height),
+            sprite,
+            alternate_background,
+            transaction_sprite,
+            transaction_shape,
+        },
+        issue: None,
+    })
 }
 
 fn preview_internal(
@@ -1193,6 +1269,59 @@ mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn standalone_static_preview_reuses_crop_and_ignores_disabled_missing_assets() {
+        use super::super::configuration::{DesiredEffects, Inputs, Selection};
+        let fixture = Fixture::new();
+        let background = fixture.0.join("static-background.png");
+        image::RgbaImage::from_fn(48, 16, |x, _| Rgba([x as u8, 40, 80, 255]))
+            .save(&background)
+            .unwrap();
+        let mut desired = DesiredEffects {
+            selection: Selection::default(),
+            inputs: Inputs {
+                background: Some(background),
+                foreground: Some("missing.png".into()),
+                particle_sprite: Some("missing-sprite.png".into()),
+                transaction_shape: Some("missing.svg".into()),
+                ..Default::default()
+            },
+            static_foreground: false,
+        };
+        let left = preview_static_draft(
+            &desired,
+            &Alignment {
+                focus_x: 0.0,
+                focus_y: 0.5,
+            },
+        )
+        .unwrap();
+        let right = preview_static_draft(
+            &desired,
+            &Alignment {
+                focus_x: 1.0,
+                focus_y: 0.5,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            left.artwork.fallback.dimensions(),
+            (CARD_WIDTH, CARD_HEIGHT)
+        );
+        assert_eq!(left.artwork.background, left.artwork.fallback);
+        assert!(left.artwork.foreground.pixels().all(|pixel| pixel[3] == 0));
+        assert!(left.artwork.fallback.pixels().all(|pixel| pixel[3] == 255));
+        assert!(
+            left.artwork.fallback.get_pixel(0, 0)[0] < right.artwork.fallback.get_pixel(0, 0)[0]
+        );
+        assert!(left.artwork.sprite.is_none() && left.artwork.transaction_shape.is_none());
+        desired.selection.particles = true;
+        assert!(preview_static_draft(&desired, &Alignment::default()).is_err());
+        desired.selection.particles = false;
+        desired.selection.transaction = true;
+        assert!(preview_static_draft(&desired, &Alignment::default()).is_err());
+    }
 
     #[test]
     fn particles_freeze_with_cross_dissolve_and_transaction_without_changing_fallback() {
