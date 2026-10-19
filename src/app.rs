@@ -1244,19 +1244,19 @@ impl eframe::App for AirCardApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
-                if self.current_tab == AppTab::Effects {
-                    self.show_effects_tab(ctx, ui);
-                } else {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.overlay_editor.busy() || self.is_busy { ui.disable(); }
-                        match self.current_tab {
-                            AppTab::Wallet => self.show_wallet_tab(ctx, ui),
-                            AppTab::Passcode => self.show_passcode_tab(ctx, ui),
-                            AppTab::Help => self.show_help_tab(ui),
-                            AppTab::Effects => unreachable!(),
-                        }
-                    });
-                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if self.current_tab != AppTab::Effects
+                        && (self.overlay_editor.busy() || self.is_busy)
+                    {
+                        ui.disable();
+                    }
+                    match self.current_tab {
+                        AppTab::Wallet => self.show_wallet_tab(ctx, ui),
+                        AppTab::Passcode => self.show_passcode_tab(ctx, ui),
+                        AppTab::Help => self.show_help_tab(ui),
+                        AppTab::Effects => self.show_effects_tab(ctx, ui),
+                    }
+                });
             });
 
         let mut show_logs = self.show_logs_window;

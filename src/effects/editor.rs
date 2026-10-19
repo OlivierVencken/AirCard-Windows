@@ -438,10 +438,6 @@ impl OverlayEditor {
         self.draft.desired_effects().selection.is_empty()
     }
 
-    pub fn uses_captured_static(&self) -> bool {
-        self.all_effects_off() && self.draft.background.is_none()
-    }
-
     pub fn recovery_pending(&self) -> bool {
         if let Some(status) = &self.history_status {
             return status.pending;
@@ -485,47 +481,6 @@ impl OverlayEditor {
     }
 
     pub fn show_inputs(&mut self, ui: &mut egui::Ui, language: Language) {
-        ui.label(language.text("Base artwork"));
-        if ui
-            .add_enabled(
-                self.all_effects_off(),
-                egui::Button::new(language.text("Use current card artwork for all-off")),
-            )
-            .clicked()
-        {
-            self.draft.background = None;
-            self.changed();
-        }
-        if ui.button(language.text("Choose background...")).clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
-                .pick_file()
-        {
-            self.draft.background = Some(path);
-            self.changed();
-        }
-        if let Some(path) = &self.draft.background {
-            ui.add(
-                egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate(),
-            )
-            .on_hover_text(path.display().to_string());
-        }
-        ui.small(language.text("Effects artwork and crop are saved separately from Wallet."));
-        let mut x = self.draft.alignment.focus_x;
-        let mut y = self.draft.alignment.focus_y;
-        let changed = ui
-            .add(egui::Slider::new(&mut x, 0.0..=1.0).text(language.text("Crop X")))
-            .changed()
-            | ui.add(egui::Slider::new(&mut y, 0.0..=1.0).text(language.text("Crop Y")))
-                .changed();
-        if changed {
-            self.draft.alignment = Alignment {
-                focus_x: x,
-                focus_y: y,
-            };
-            self.changed();
-        }
-        ui.add_space(12.0);
         let mut parallax = self.draft.parallax;
         if ui
             .checkbox(&mut parallax, language.text("Parallax"))
@@ -549,43 +504,6 @@ impl OverlayEditor {
         self.show_cross_dissolve_controls(ui, language);
         self.show_particle_controls(ui, language);
         self.show_transaction_controls(ui, language);
-        ui.add_space(8.0);
-        if let Some(applied) = self.draft.last_applied {
-            ui.label(language.text("Last verified apply (device not rechecked)"));
-            for (name, before, after) in [
-                ("Parallax", applied.parallax, parallax),
-                (
-                    "Cross-dissolve",
-                    applied.cross_dissolve,
-                    self.draft.cross_dissolve,
-                ),
-                (
-                    "Particles (experimental)",
-                    applied.particles,
-                    self.draft.neutral_particles_enabled,
-                ),
-                (
-                    "Transaction effect (experimental)",
-                    applied.transaction,
-                    self.draft.transaction,
-                ),
-            ] {
-                ui.small(format!(
-                    "{}: {}",
-                    language.text(name),
-                    language.text(match (before, after) {
-                        (true, true) => "Keep",
-                        (false, true) => "Add",
-                        (true, false) => "Remove",
-                        _ => "Off",
-                    })
-                ));
-            }
-        } else {
-            ui.small(language.text(
-                "Installed effects have not been checked. Apply verifies captured metadata.",
-            ));
-        }
     }
 
     fn changed(&mut self) {
@@ -596,6 +514,13 @@ impl OverlayEditor {
     }
 
     pub fn use_wallet_artwork(&mut self, path: Option<PathBuf>, focus: [f32; 2]) {
+        if self.busy()
+            || (self.draft.background == path
+                && self.draft.alignment.focus_x == f64::from(focus[0])
+                && self.draft.alignment.focus_y == f64::from(focus[1]))
+        {
+            return;
+        }
         self.sync_background(path, focus);
         if let Err(error) = self.remember() {
             self.error = Some(format!("Could not save effects drafts: {error:#}"));
@@ -970,12 +895,7 @@ impl OverlayEditor {
                 .truncate(),
             )
             .on_hover_text(path.display().to_string());
-        } else {
-            ui.small(language.text("Choose an alternate background image for cross-dissolve"));
         }
-        ui.small(
-            language.text("The alternate background shows at rest; tilt reveals the base artwork."),
-        );
         ui.add_enabled_ui(self.alternate_texture.is_some(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
@@ -990,9 +910,7 @@ impl OverlayEditor {
                 );
             });
         });
-        ui.small(
-            language.text("Preview shows artwork only; the static fallback uses the base artwork."),
-        );
+
     }
 
     pub(crate) fn set_particles(&mut self, enabled: bool) {
@@ -1008,7 +926,7 @@ impl OverlayEditor {
     pub fn show_particle_controls(&mut self, ui: &mut egui::Ui, language: Language) {
         let mut enabled = self.draft.neutral_particles_enabled;
         let mut changed = ui
-            .checkbox(&mut enabled, language.text("Particles (experimental)"))
+            .checkbox(&mut enabled, language.text("Particles"))
             .changed();
         if changed {
             self.set_particles(enabled);
@@ -1040,9 +958,7 @@ impl OverlayEditor {
                     ));
                 }
             });
-            ui.small(
-                language.text("Native twinkling at low density, physics off. Preview is static."),
-            );
+
         }
         if changed && let Err(error) = self.remember() {
             self.error = Some(format!("Could not save overlay settings: {error:#}"));
@@ -1069,7 +985,7 @@ impl OverlayEditor {
         let mut changed = ui
             .checkbox(
                 &mut enabled,
-                language.text("Transaction effect (experimental)"),
+                language.text("Transaction effect"),
             )
             .changed();
         if changed {
@@ -1079,11 +995,7 @@ impl OverlayEditor {
             if device::experimental_transaction_enabled() {
                 ui.colored_label(ui.visuals().warn_fg_color, language.text("Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind."));
             }
-            ui.small(
-                language.text(
-                    "An expanding particle outline during payment results. Preview is static.",
-                ),
-            );
+
             ui.horizontal(|ui| {
                 let has_preview = self.transaction_texture.is_some() && self.transaction_outline.is_some();
                 let picker_width = (ui.available_width() - if has_preview { 108.0 } else { 0.0 }).max(160.0);
@@ -1095,7 +1007,7 @@ impl OverlayEditor {
                         }
                         if let Some(path) = &self.draft.transaction_sprite {
                             ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
-                        } else { ui.small(language.text("Choose a transaction particle PNG")); }
+                        }
                     });
                     ui.horizontal(|ui| {
                         if ui.button(language.text("Shape SVG...")).on_hover_text(language.text("SVG needs width and height, with one direct path and only a d attribute. Flatten transforms and groups before importing.")).clicked()
@@ -1104,7 +1016,7 @@ impl OverlayEditor {
                         }
                         if let Some(path) = &self.draft.transaction_shape {
                             ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
-                        } else { ui.small(language.text("Choose a transaction shape SVG")); }
+                        }
                     });
                 });
                 if let (Some(texture), Some(shape)) = (&self.transaction_texture, &self.transaction_outline) {
@@ -1118,11 +1030,7 @@ impl OverlayEditor {
                     }
                 }
             });
-            ui.small(
-                language.text(
-                    "Particle and outline preview only; payment animation runs on the phone.",
-                ),
-            );
+
         }
         if changed && let Err(error) = self.remember() {
             self.error = Some(format!("Could not save overlay settings: {error:#}"));
@@ -1493,6 +1401,33 @@ mod tests {
         editor.history_status = None;
         editor.storage_error = Some("corrupt drafts".into());
         assert!(!editor.can_reset(&binding));
+    }
+
+    #[test]
+    fn wallet_artwork_sync_updates_crop_without_resetting_effects_or_busy_work() {
+        let mut editor = isolated_editor();
+        editor.select_target(Some(target("card-a")));
+        editor.draft.parallax = true;
+        editor.draft.foreground = Some("overlay.png".into());
+        editor.use_wallet_artwork(Some("wallet.png".into()), [0.25, 0.75]);
+        assert_eq!(editor.draft.background, Some("wallet.png".into()));
+        assert_eq!(editor.draft.alignment.focus_x, 0.25);
+        assert_eq!(editor.draft.alignment.focus_y, 0.75);
+        editor.dirty = false;
+        editor.status = Some("Verified".into());
+        editor.use_wallet_artwork(Some("wallet.png".into()), [0.25, 0.75]);
+        assert!(!editor.dirty);
+        assert_eq!(editor.status.as_deref(), Some("Verified"));
+        let (_sender, receiver) = channel();
+        editor.receiver = Some(receiver);
+        editor.use_wallet_artwork(None, [0.5, 0.5]);
+        assert_eq!(editor.draft.background, Some("wallet.png".into()));
+        editor.receiver = None;
+        editor.use_wallet_artwork(None, [0.5, 0.5]);
+        assert!(editor.draft.background.is_none());
+        assert!(editor.draft.parallax);
+        assert_eq!(editor.draft.foreground, Some("overlay.png".into()));
+        assert!(editor.apply_issue().is_some());
     }
 
     #[test]

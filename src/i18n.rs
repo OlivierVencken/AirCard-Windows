@@ -157,7 +157,7 @@ impl Language {
             "An expanding particle outline during payment results. Preview is static." => {
                 "付款结果显示时播放扩大的粒子轮廓。预览为静态。"
             }
-            "Particles (experimental)" => "粒子（实验性）",
+            "Particles" => "粒子",
             "Choose Particle PNG..." => "选择粒子 PNG...",
             "Choose a transparent particle PNG" => "请选择透明粒子 PNG",
             "Experimental trial: particle originals may be unknown. Restore may leave the three neutral emitter PNGs behind." => {
@@ -166,7 +166,7 @@ impl Language {
             "Native twinkling at low density, physics off. Preview is static." => {
                 "原生低密度闪烁，关闭物理效果。预览为静态。"
             }
-            "Transaction effect (experimental)" => "交易效果（实验性）",
+            "Transaction effect" => "交易效果",
             "Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind." => {
                 "实验性试用：交易效果原件可能未知。恢复后可能仍保留三个发射器 PNG 和轮廓 SVG 文件。"
             }

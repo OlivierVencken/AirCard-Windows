@@ -74,11 +74,13 @@ impl AirCardApp {
                 .truncate(),
         );
         ui.label(self.card_hash.trim());
-        ui.small(language.text("Draft changes do not change the phone until you apply."));
         ui.add_space(8.0);
 
-        // Actions precede the scrollable editor, keeping recovery and progress
-        // reachable at small window sizes and with long input paths.
+        // Wallet owns the base image and crop; only effect inputs belong here.
+        if !self.is_busy && !self.scanning_syslog {
+            self.overlay_editor
+                .use_wallet_artwork(self.source_path.clone(), self.crop_focus);
+        }
         ui.horizontal_wrapped(|ui| {
             let apply_label = if self.overlay_editor.all_effects_off() {
                 "Turn off effects"
@@ -142,12 +144,6 @@ impl AirCardApp {
                 self.overlay_editor.restore_baseline(ctx, binding);
             }
         });
-        if !self
-            .overlay_editor
-            .can_restore_baseline(target.as_ref().unwrap())
-        {
-            ui.small(language.text("If baseline history is incomplete, you can still remove all managed effects below."));
-        }
         let binding = self.overlay_binding();
         let can_reset = !self.is_busy
             && !self.scanning_syslog
@@ -179,14 +175,6 @@ impl AirCardApp {
                 self.overlay_editor.reset(ctx, binding, true);
             }
         });
-        ui.small(language.text("Remove all effects uses the selected background and crop. With no artwork selected, it uses the recovered background without the overlay. Reset restores saved original artwork when available."));
-        if !has_original {
-            ui.small(language.text("No complete original artwork backup is available. Remove effects first, then use Wallet artwork controls. A factory reset cannot be reconstructed from missing originals."));
-        }
-        ui.small(language.text("Unknown original effect files may remain. Incomplete cleanup retains recovery and blocks further writes; protected-file deletion is not proven."));
-        if self.overlay_editor.uses_captured_static() {
-            ui.label(language.text("No artwork selection is required for removal. All-off keeps ordinary artwork, or uses the recovered background layer without the overlay."));
-        }
         if self.is_busy || self.scanning_syslog {
             ui.label(language.text("Wait for the current operation to finish."));
         } else if self.overlay_binding().is_none() {
@@ -205,22 +193,13 @@ impl AirCardApp {
         let locked = self.is_busy || self.scanning_syslog || self.overlay_editor.busy();
         if ui.available_width() >= 920.0 {
             ui.columns(2, |columns| {
-                egui::ScrollArea::vertical().id_salt("effects_inputs").show(
-                    &mut columns[0],
-                    |ui| {
-                        m3_card(ui, |ui| self.show_effects_inputs(ui, locked));
-                    },
-                );
+                m3_card(&mut columns[0], |ui| self.show_effects_inputs(ui, locked));
                 m3_card(&mut columns[1], |ui| self.show_effects_preview(ui, 440.0));
             });
         } else {
-            egui::ScrollArea::vertical()
-                .id_salt("effects_stacked")
-                .show(ui, |ui| {
-                    m3_card(ui, |ui| self.show_effects_preview(ui, 300.0));
-                    ui.add_space(8.0);
-                    m3_card(ui, |ui| self.show_effects_inputs(ui, locked));
-                });
+            m3_card(ui, |ui| self.show_effects_preview(ui, 300.0));
+            ui.add_space(8.0);
+            m3_card(ui, |ui| self.show_effects_inputs(ui, locked));
         }
     }
 
@@ -234,16 +213,6 @@ impl AirCardApp {
         );
         ui.add_space(8.0);
         ui.add_enabled_ui(!locked, |ui| {
-            if ui
-                .add_enabled(
-                    self.source_path.is_some(),
-                    egui::Button::new(language.text("Use Wallet artwork and crop")),
-                )
-                .clicked()
-            {
-                self.overlay_editor
-                    .use_wallet_artwork(self.source_path.clone(), self.crop_focus);
-            }
             self.overlay_editor.show_inputs(ui, language);
         });
     }
@@ -255,9 +224,6 @@ impl AirCardApp {
             egui::RichText::new(language.text("Static preview"))
                 .strong()
                 .size(16.0),
-        );
-        ui.small(
-            language.text("Artwork only. Native motion and payment animation run on the phone."),
         );
         ui.add_space(12.0);
         let width = ui.available_width().min(max_width).max(1.0);
