@@ -217,23 +217,17 @@ impl AirCardApp {
         });
     }
 
-    fn show_effects_preview(&self, ui: &mut egui::Ui, max_width: f32) {
+    fn show_effects_preview(&mut self, ui: &mut egui::Ui, max_width: f32) {
         ui.set_min_width(ui.available_width());
         let language = self.language;
         ui.label(
-            egui::RichText::new(language.text("Static preview"))
+            egui::RichText::new(language.text("Preview"))
                 .strong()
                 .size(16.0),
         );
         ui.add_space(12.0);
         let width = ui.available_width().min(max_width).max(1.0);
-        if let Some(texture) = self.overlay_editor.preview_texture() {
-            ui.add(
-                egui::Image::new(texture)
-                    .fit_to_exact_size(egui::vec2(width, width * 969.0 / 1536.0))
-                    .corner_radius(16),
-            );
-        } else {
+        if !self.overlay_editor.show_motion_preview(ui, width, language) {
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(width, width * 969.0 / 1536.0),
                 egui::Sense::hover(),

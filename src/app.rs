@@ -1950,6 +1950,7 @@ mod tests {
             requested: bool,
             expect_overlay_valid: bool,
             foreground: PathBuf,
+            motion_qa: bool,
         }
         impl Capture {
             fn prepare_stage(&mut self) {
@@ -1969,6 +1970,31 @@ mod tests {
                         self.app.overlay_editor.set_overlay_path(opaque);
                     }
                     self.app.overlay_editor.qa_state(state, &self.directory);
+                    if state == 8 {
+                        let alternate = self.directory.join("qa-motion-alternate.png");
+                        image::RgbaImage::from_fn(480, 303, |x, y| image::Rgba([
+                            100 + (x * 100 / 480) as u8, 40 + (y * 60 / 303) as u8, 160, 255
+                        ])).save(&alternate).unwrap();
+                        let sprite = self.directory.join("qa-motion-sprite.png");
+                        let mut pixels = image::RgbaImage::new(32, 32);
+                        for y in 8..24 { for x in 8..24 {
+                            if (x as i32 - 16).abs() + (y as i32 - 16).abs() < 9 {
+                                pixels.put_pixel(x, y, image::Rgba([255, 220, 130, 240]));
+                            }
+                        }}
+                        pixels.save(&sprite).unwrap();
+                        let shape = self.directory.join("qa-motion-shape.svg");
+                        std::fs::write(&shape, br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><path d="M50 15 L85 80 L15 80 Z"/></svg>"#).unwrap();
+                        self.app.overlay_editor.enable_parallax_for_qa();
+                        self.app.overlay_editor.set_overlay_path(self.foreground.clone());
+                        self.app.overlay_editor.set_cross_dissolve(true);
+                        self.app.overlay_editor.set_alternate_background(alternate);
+                        self.app.overlay_editor.set_particles(true);
+                        self.app.overlay_editor.set_particle_sprite(sprite.clone());
+                        self.app.overlay_editor.set_transaction(true);
+                        self.app.overlay_editor.set_transaction_sprite(sprite);
+                        self.app.overlay_editor.set_transaction_shape(shape);
+                    }
                 }
             }
         }
@@ -1979,18 +2005,26 @@ mod tests {
                 }));
                 if let Some(image) = screenshot {
                     let bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| pixel.to_array()).collect();
-                    let name = ["configured", "wallet", "empty", "invalid", "busy", "success", "recovery", "all-off"][self.stage / 2];
+                    let name = ["configured", "wallet", "empty", "invalid", "busy", "success", "recovery", "all-off", "tilt-left", "tilt-right", "transaction"][self.stage / 2];
                     let size = if self.stage % 2 == 0 { "wide" } else { "narrow" };
                     image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, bytes).unwrap()
                         .save(self.directory.join(format!("{name}-{size}.png"))).unwrap();
                     self.stage += 1;
-                    if self.stage == 16 { ctx.send_viewport_cmd(egui::ViewportCommand::Close); return; }
+                    if self.stage == (if self.motion_qa { 22 } else { 16 }) { ctx.send_viewport_cmd(egui::ViewportCommand::Close); return; }
                     self.frames = 0;
                     self.stage_started = std::time::Instant::now();
                     self.requested = false;
                     self.prepare_stage();
                     let size = if self.stage % 2 == 1 { [880.0, 900.0] } else { [1080.0, 820.0] };
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+                }
+                if self.stage / 2 >= 8 {
+                    let (tilt, transaction) = match self.stage / 2 {
+                        8 => (egui::vec2(-0.45, 0.12), None),
+                        9 => (egui::vec2(0.8, -0.4), None),
+                        _ => (egui::Vec2::ZERO, Some(1.1)),
+                    };
+                    self.app.overlay_editor.preview_motion_for_qa(tilt, transaction);
                 }
                 self.app.update(ctx, frame);
                 self.frames += 1;
@@ -2077,6 +2111,7 @@ mod tests {
                     requested: false,
                     expect_overlay_valid: std::env::var_os("AIRCARD_EFFECTS_QA_EXPECT_INVALID_OVERLAY").is_none(),
                     foreground: overlay,
+                    motion_qa: std::env::var_os("AIRCARD_EFFECTS_QA_MOTION").is_some(),
                 }))
             }),
         )

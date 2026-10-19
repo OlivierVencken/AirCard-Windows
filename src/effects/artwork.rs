@@ -494,18 +494,6 @@ pub struct EffectsPreview {
     pub transaction_shape: Option<Vec<u8>>,
 }
 
-impl EffectsPreview {
-    pub fn alternate_composite(&self) -> Option<RgbaImage> {
-        self.alternate_background.as_ref().map(|alternate| {
-            let (width, height) = self.fallback.dimensions();
-            let x = (alternate.width() - width) / 2;
-            let y = (alternate.height() - height) / 2;
-            let back = image::imageops::crop_imm(alternate, x, y, width, height).to_image();
-            let front = image::imageops::crop_imm(&self.foreground, x, y, width, height).to_image();
-            composite(&back, &front)
-        })
-    }
-}
 
 fn overlay_issue(image: &RgbaImage, cropped: bool) -> Option<&'static str> {
     if image.pixels().all(|p| p[3] == 255) {

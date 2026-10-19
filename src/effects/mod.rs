@@ -6,6 +6,7 @@ mod device;
 mod editor;
 mod managed;
 mod metadata;
+mod preview;
 mod recovery;
 mod transaction;
 mod transition;

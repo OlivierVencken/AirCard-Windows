@@ -110,7 +110,10 @@ impl Language {
             "Open Effects" => "打开效果",
             "Go to Wallet" => "前往钱包",
             "Configuration" => "配置",
-            "Static preview" => "静态预览",
+            "Preview" => "预览",
+            "Move your mouse over the card to tilt." => "在卡片上移动鼠标以模拟倾斜。",
+            "Local simulation. Motion and particle timing may differ on iPhone." => "本地模拟。iPhone 上的运动和粒子时序可能不同。",
+            "Play transaction" => "播放交易动画",
             "No valid composition yet" => "尚无有效合成预览",
             "Artwork only. Native motion and payment animation run on the phone." => {
                 "仅预览图像；原生动态效果和付款动画在手机上运行。"

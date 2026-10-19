@@ -187,11 +187,10 @@ pub(crate) struct OverlayEditor {
     history_status: Option<device::ManagedOutcome>,
     history_error: Option<String>,
     preview_texture: Option<egui::TextureHandle>,
-    alternate_texture: Option<egui::TextureHandle>,
+    motion_preview: Option<super::preview::Scene>,
     transaction_texture: Option<egui::TextureHandle>,
     particle_texture: Option<egui::TextureHandle>,
     transaction_outline: Option<super::transaction::Shape>,
-    show_alternate: bool,
     dirty: bool,
     status: Option<String>,
     error: Option<String>,
@@ -233,11 +232,10 @@ impl Default for OverlayEditor {
             history_status: None,
             history_error: None,
             preview_texture: None,
-            alternate_texture: None,
+            motion_preview: None,
             transaction_texture: None,
             particle_texture: None,
             transaction_outline: None,
-            show_alternate: false,
             dirty: true,
             status: None,
             error: None,
@@ -311,7 +309,6 @@ impl OverlayEditor {
             self.draft.recovery = self.draft.prior_recovery.take();
         }
         self.invalidate_preview();
-        self.show_alternate = false;
         self.error = self.draft.last_error.clone();
         self.status = self.draft.last_status.clone();
         self.refresh_history();
@@ -597,9 +594,10 @@ impl OverlayEditor {
     }
 
     #[cfg(test)]
-    pub(crate) fn show_alternate_for_qa(&mut self) {
-        assert!(self.alternate_texture.is_some());
-        self.show_alternate = true;
+    pub(crate) fn preview_motion_for_qa(&mut self, tilt: egui::Vec2, transaction: Option<f32>) {
+        if let Some(scene) = &mut self.motion_preview {
+            scene.qa_frame(tilt, transaction);
+        }
     }
 
     fn remember(&self) -> Result<()> {
@@ -765,16 +763,11 @@ impl OverlayEditor {
             .transaction_shape
             .as_ref()
             .and_then(|bytes| super::transaction::validate(bytes).ok());
-        self.alternate_texture = preview.alternate_composite().map(|image| {
-            ctx.load_texture(
-                "wallet-cross-dissolve-alternate",
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [image.width() as usize, image.height() as usize],
-                    image.as_raw(),
-                ),
-                egui::TextureOptions::LINEAR,
-            )
-        });
+        self.motion_preview = Some(super::preview::Scene::new(
+            ctx, &preview, self.draft.desired_effects().selection,
+            self.particle_texture.clone(), self.transaction_texture.clone(),
+            self.transaction_outline.as_ref(),
+        ));
         // Use the exact flattened fallback produced by managed artwork preparation.
         let image = preview.fallback;
         let dimensions = [image.width() as usize, image.height() as usize];
@@ -785,15 +778,20 @@ impl OverlayEditor {
         ));
     }
 
+    #[cfg(test)]
     pub fn preview_texture(&self) -> Option<&egui::TextureHandle> {
-        if self.show_alternate {
-            self.alternate_texture
-                .as_ref()
-                .or(self.preview_texture.as_ref())
+        self.preview_texture.as_ref()
+    }
+
+    pub fn show_motion_preview(&mut self, ui: &mut egui::Ui, width: f32, language: Language) -> bool {
+        if let Some(scene) = &mut self.motion_preview {
+            scene.show(ui, width, language);
+            true
         } else {
-            self.preview_texture.as_ref()
+            false
         }
     }
+
     /// Use the Wallet image picker for the background and crop
     pub fn sync_background(&mut self, path: Option<PathBuf>, focus: [f32; 2]) {
         if self.draft.background != path
@@ -812,7 +810,7 @@ impl OverlayEditor {
     fn invalidate_preview(&mut self) {
         self.dirty = true;
         self.preview_texture = None;
-        self.alternate_texture = None;
+        self.motion_preview = None;
         self.transaction_texture = None;
         self.particle_texture = None;
         self.transaction_outline = None;
@@ -847,7 +845,6 @@ impl OverlayEditor {
 
     pub(crate) fn set_cross_dissolve(&mut self, enabled: bool) {
         self.draft.cross_dissolve = enabled;
-        self.show_alternate = false;
         self.invalidate_preview();
     }
 
@@ -896,21 +893,6 @@ impl OverlayEditor {
             )
             .on_hover_text(path.display().to_string());
         }
-        ui.add_enabled_ui(self.alternate_texture.is_some(), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(
-                    &mut self.show_alternate,
-                    false,
-                    language.text("Base artwork"),
-                );
-                ui.selectable_value(
-                    &mut self.show_alternate,
-                    true,
-                    language.text("Alternate artwork"),
-                );
-            });
-        });
-
     }
 
     pub(crate) fn set_particles(&mut self, enabled: bool) {
@@ -1561,13 +1543,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(editor.ready(), "{:?}", editor.error);
-        let base_id = editor.preview_texture().unwrap().id();
-        editor.show_alternate_for_qa();
-        assert_ne!(editor.preview_texture().unwrap().id(), base_id);
-        assert!(
-            editor.ready(),
-            "Inspecting the alternate does not change Apply eligibility"
-        );
+        assert!(editor.motion_preview.is_some());
+        editor.preview_motion_for_qa(egui::vec2(1.0, -1.0), None);
+        assert!(editor.ready(), "Simulated tilt must not change Apply eligibility");
         let saved: Draft =
             serde_json::from_slice(&serde_json::to_vec(&editor.draft).unwrap()).unwrap();
         assert!(saved.cross_dissolve);
