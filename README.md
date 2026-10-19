@@ -101,27 +101,9 @@ Use artwork with background margins and keep the overlay subject away from the c
 
 **Cross-dissolve:** Enable **Cross-dissolve** and choose an opaque alternate PNG, JPG or WebP with **Choose Alternate Background...**. The preview shows the alternate at rest; mouse tilt reveals the base through a radial mask while parallax continues. Installation requires recoverable originals for every additional PNG. The static fallback uses the base composition.
 
-**Transaction effect:** Enable **Transaction effect**, then choose a visible transparent sprite with **Particle PNG...** and a single-path SVG with **Shape SVG...**. **Play transaction** below the preview runs the expanding particle outline locally. It can combine with the other effects.
-
-The SVG must have positive pixel `width` and `height`, and one direct `<path>` child with only a `d` attribute. An optional `viewBox` must match `0 0 width height`. Flatten groups and transforms before importing; scripts, linked resources, entities and additional elements are rejected. A minimal shape is:
-
-```xml
-<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
-  <path d="M50 5 L95 95 L5 95 Z"/>
-</svg>
-```
-
-Normal transaction installation requires recoverable originals for the SVG and all three emitter PNG scale candidates, as well as the existing overlay assets and metadata. Missing exports block Apply. A recovered emitter PDF also blocks installation because it may take precedence. Use this executable to restore transaction applications; older versions cannot read their new recovery journal kinds.
-
-**Explicit transaction trial:** Close AirCard, then run [`try-transaction-experimental.cmd`](try-transaction-experimental.cmd) to launch with the transaction-only missing-originals exception. It permits unknown originals for the three transaction emitter PNGs and shape SVG, and shows an incomplete-recovery warning. Metadata, base artwork and cross-dissolve originals remain mandatory. Restore reapplies known originals but may leave those four transaction files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply anything automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
-
-To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; the preview button runs locally and cannot trigger the phone's payment renderer. The operator confirmed transaction playback after a completed Apple Pay payment on 18 October 2026. Failure-result playback and restart persistence remain unverified.
-
 **Particles:** Enable **Particles** and select a transparent PNG with **Choose Particle PNG...**. The preview animates the selected sprite using twinkling, low density and physics off. It can combine with cross-dissolve and transaction effects. Normal launches require recoverable originals for every overwritten resource.
 
-**Explicit particle trial:** After building the release executable, close AirCard and run [`try-particles-experimental.cmd`](try-particles-experimental.cmd). It permits unknown originals only for `neutralEmitter.png`, `neutralEmitter@2x.png` and `neutralEmitter@3x.png`. Metadata, base, alternate and transaction originals remain required. Restore may leave those three files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
-
-In Overlay mode, **Restore previous skin** restores the card's state before the latest overlay apply, which may already contain parallax. Recovery remains available after restarting AirCard or a failed operation. Keep `%LOCALAPPDATA%/AirCard/effects-applications/`: it contains the original artwork, metadata and recovery journals. **Restore Original** belongs to the ordinary skin workflow.
+**Transaction effect:** Enable **Transaction effect**, then choose a visible transparent sprite with **Particle PNG...** and a single-path SVG with **Shape SVG...**. **Play transaction** below the preview runs the expanding particle outline locally. It can combine with the other effects.
 
 ---
 
