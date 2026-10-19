@@ -632,19 +632,20 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
     };
     save(dir, &journal)?;
     capture_and_return(dir, &mut journal, &mut afc, &session, &[0, 1, 2])?;
-    if journal.assets[..3]
-        .iter()
-        .any(|asset| asset.original_sha256.is_none())
-    {
+    let ordinary = recovered_ordinary_indices(&journal);
+    if ordinary.is_empty() {
         journal.status = "OrdinaryExportUnprovenMetadataNotTargeted".into();
         save(dir, &journal)?;
         anyhow::bail!(
-            "Ordinary export did not recover all three known artwork files; metadata was not targeted. Recovery directory: {}",
+            "Ordinary artwork export recovered no files; metadata was not targeted. Recovery directory: {}",
             dir.display()
         );
     }
-    let recovered = capture_and_return(dir, &mut journal, &mut afc, &session, &[0, 1, 2])?;
-    require_roundtrip(&recovered, &[0, 1, 2])?;
+    // Some cards carry only a subset of the ordinary PNG/PDF variants. Prove
+    // return and fresh re-export of every observed file before touching metadata;
+    // unreturned slots remain Unknown and cannot authorize later writes.
+    let recovered = capture_and_return(dir, &mut journal, &mut afc, &session, &ordinary)?;
+    require_roundtrip(&recovered, &ordinary)?;
     let indices: Vec<_> = (3..journal.assets.len()).collect();
     capture_and_return(dir, &mut journal, &mut afc, &session, &indices)?;
     if journal.assets[3].original_sha256.is_none() {
@@ -659,6 +660,14 @@ fn capture_metadata_for_binding(dir: &Path, binding: Binding) -> Result<()> {
     // Verify restored bytes before cleanup; retain Media originals on conflict
     verify_captured_originals(dir, &mut journal, &mut afc, &session)?;
     finish_metadata_capture(dir, &mut journal)
+}
+
+fn recovered_ordinary_indices(journal: &Journal) -> Vec<usize> {
+    journal.assets[..3]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, asset)| asset.original_sha256.is_some().then_some(index))
+        .collect()
 }
 
 fn finish_metadata_capture(dir: &Path, journal: &mut Journal) -> Result<()> {
@@ -1081,6 +1090,24 @@ pub(super) mod tests {
         )
         .unwrap();
         assert!(require_roundtrip(&fresh, &expected).is_ok());
+    }
+
+    #[test]
+    fn ordinary_capture_proof_tracks_every_observed_variant_without_requiring_missing_siblings() {
+        for mask in 0..8 {
+            let mut journal = recovery_capture_fixture();
+            for index in 0..3 {
+                journal.assets[index].original_sha256 =
+                    (mask & (1 << index) != 0).then(|| sha256(b"original"));
+            }
+            let expected: Vec<_> = (0..3).filter(|index| mask & (1 << index) != 0).collect();
+            let indices = recovered_ordinary_indices(&journal);
+            assert_eq!(indices, expected);
+            assert!(require_roundtrip(&indices, &expected).is_ok());
+            if !indices.is_empty() {
+                assert!(require_roundtrip(&indices[1..], &expected).is_err());
+            }
+        }
     }
 
     #[test]

@@ -95,6 +95,53 @@ pub(super) fn resource_names(selection: Selection) -> BTreeSet<String> {
         .collect()
 }
 
+/// Select only captured variants, except for the existing explicitly scoped
+/// trial policies. Unknown is never absence and does not authorize creation.
+/// At least one candidate for every required role must remain installable.
+fn installable_names(
+    source: &Snapshot,
+    desired: Selection,
+    policy: TrialPolicy,
+) -> Result<BTreeSet<String>> {
+    let families = if desired.is_empty() {
+        vec![
+            crate::wallet_backup::CARD_ARTWORK_ASSETS
+                .iter()
+                .map(|leaf| (*leaf).to_owned())
+                .collect::<Vec<_>>(),
+        ]
+    } else {
+        desired
+            .requirements(false)
+            .resources
+            .into_iter()
+            .map(|role| role.candidate_filenames())
+            .collect()
+    };
+    let mut names = BTreeSet::new();
+    for family in families {
+        let recovered: Vec<_> = family
+            .iter()
+            .filter(|leaf| {
+                source
+                    .resources
+                    .get(*leaf)
+                    .and_then(Option::as_ref)
+                    .is_some()
+                    || policy.permits(leaf)
+            })
+            .cloned()
+            .collect();
+        ensure!(
+            !recovered.is_empty(),
+            "No recoverable original for required artwork family: {}. Missing exports remain Unknown; installation was not started",
+            family.join(", ")
+        );
+        names.extend(recovered);
+    }
+    Ok(names)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Disposition {
     Install,
@@ -227,8 +274,13 @@ fn plan_apply(
     } else {
         resource_names(desired)
     };
+    let installable = installable_names(source, desired, policy)?;
+    // Authoring can provide the complete canonical set or an exact captured
+    // subset when preserving ordinary bytes. Never accept an arbitrary partial
+    // candidate that could omit another recovered, higher-priority variant.
+    let provided = artwork.keys().cloned().collect::<BTreeSet<_>>();
     ensure!(
-        artwork.keys().cloned().collect::<BTreeSet<_>>() == target_names,
+        provided == target_names || provided == installable,
         "Target artwork inventory does not match the desired effects"
     );
     let mut plan = Plan {
@@ -251,7 +303,10 @@ fn plan_apply(
             );
         }
     }
-    for (leaf, after) in artwork {
+    for (leaf, after) in artwork
+        .iter()
+        .filter(|(leaf, _)| installable.contains(*leaf))
+    {
         after.read()?;
         let before = source
             .resources
@@ -615,6 +670,24 @@ mod tests {
         let mut source = fixture.snapshot(0, "source");
         source.resources.insert("neutralEmitter.png".into(), None);
         let artwork = fixture.artwork(5, "target");
+        let plan = apply(
+            &source,
+            None,
+            None,
+            false,
+            from_bits(5),
+            &artwork,
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            plan.changes
+                .iter()
+                .all(|change| change.leaf != "neutralEmitter.png")
+        );
+        for leaf in ["neutralEmitter@2x.png", "neutralEmitter@3x.png"] {
+            source.resources.insert(leaf.into(), None);
+        }
         assert!(
             apply(
                 &source,
@@ -628,9 +701,137 @@ mod tests {
             .is_err()
         );
         assert!(apply(&source, None, None, false, from_bits(5), &artwork, policy).is_ok());
+        for leaf in [
+            "backgroundParallax.png",
+            "backgroundParallax@2x.png",
+            "backgroundParallax@3x.png",
+        ] {
+            source.resources.insert(leaf.into(), None);
+        }
+        assert!(apply(&source, None, None, false, from_bits(5), &artwork, policy).is_err());
+    }
+
+    #[test]
+    fn single_scale_layouts_cover_every_selection_without_creating_unknown_siblings() {
+        let fixture = Fixture::new();
+        for suffix in ["@2x.png", "@3x.png", ".png"] {
+            for bits in 1..16 {
+                let mut source = fixture.snapshot(0, "source");
+                for (leaf, blob) in &mut source.resources {
+                    if leaf.ends_with(".png")
+                        && (if suffix == ".png" {
+                            leaf.contains('@')
+                        } else {
+                            !leaf.ends_with(suffix)
+                        })
+                    {
+                        *blob = None;
+                    }
+                }
+                let artwork = fixture.artwork(bits, "target");
+                let plan = apply(
+                    &source,
+                    None,
+                    None,
+                    false,
+                    from_bits(bits),
+                    &artwork,
+                    Default::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    plan.changes.len(),
+                    from_bits(bits).requirements(false).resources.len()
+                );
+                for change in &plan.changes {
+                    assert_eq!(
+                        change.expected_preimage.as_ref(),
+                        source.resources[&change.leaf]
+                            .as_ref()
+                            .map(|blob| &blob.sha256)
+                    );
+                }
+                let mut store =
+                    managed::Store::open(fixture.directory().join("index.json"), &source.binding)
+                        .unwrap();
+                let directory = fixture.directory();
+                store.begin(&directory).unwrap();
+                let reference = store
+                    .prepare(&directory, Mode::Apply, source.clone(), plan, None)
+                    .unwrap();
+                let operation = managed::load_operation(&reference, &source.binding).unwrap();
+                assert!(
+                    operation
+                        .target
+                        .resources
+                        .iter()
+                        .all(|(leaf, blob)| source.resources[leaf].is_some() || blob.is_none())
+                );
+                // Simulate exact restoration of the proven source after restart.
+                let undo = restore(&operation.target, &operation.target, &source).unwrap();
+                assert!(undo.inert.is_empty());
+                assert_eq!(undo.changes.len(), operation.changes.len());
+                for change in undo.changes {
+                    assert_eq!(
+                        change.after,
+                        *source.resources[&change.leaf].as_ref().unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_ordinary_layout_preserves_unknowns_and_rejects_incomplete_candidates_and_pdf_precedence()
+     {
+        let fixture = Fixture::new();
+        let mut source = fixture.snapshot(0, "source");
+        for leaf in [
+            "cardBackgroundCombined@3x.png",
+            "cardBackgroundCombined.pdf",
+        ] {
+            source.resources.insert(leaf.into(), None);
+        }
+        let artwork = fixture.artwork(0, "target");
+        let plan = reset(&source, None, None, &artwork).unwrap();
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].leaf, "cardBackgroundCombined@2x.png");
         source
             .resources
-            .insert("backgroundParallax.png".into(), None);
-        assert!(apply(&source, None, None, false, from_bits(5), &artwork, policy).is_err());
+            .insert("cardBackgroundCombined@2x.png".into(), None);
+        assert!(reset(&source, None, None, &artwork).is_err());
+
+        let mut source = fixture.snapshot(0, "source");
+        let mut artwork = fixture.artwork(1, "target");
+        artwork.remove("backgroundParallax.png");
+        assert!(
+            apply(
+                &source,
+                None,
+                None,
+                false,
+                from_bits(1),
+                &artwork,
+                Default::default()
+            )
+            .is_err()
+        );
+        let artwork = fixture.artwork(1, "complete");
+        source.resources.insert(
+            "backgroundParallax@2x.pdf".into(),
+            Some(fixture.blob(b"preferred PDF")),
+        );
+        assert!(
+            apply(
+                &source,
+                None,
+                None,
+                false,
+                from_bits(1),
+                &artwork,
+                Default::default()
+            )
+            .is_err()
+        );
     }
 }
