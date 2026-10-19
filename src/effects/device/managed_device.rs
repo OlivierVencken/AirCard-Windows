@@ -1,9 +1,6 @@
-//! Managed orchestration over the existing serialized, verified transport.
-//! The raw recovery journal remains usable independently of the history index.
-
 use super::*;
 use crate::effects::configuration::DesiredEffects;
-use crate::effects::managed::{self as history, Blob, Mode, Operation, Phase, Snapshot, Store};
+use crate::effects::managed::{self as history, Blob, Mode, Phase, Snapshot, Store};
 use crate::effects::transition::{self, TrialPolicy};
 use std::collections::BTreeMap;
 
@@ -87,33 +84,17 @@ fn outcome(store: &Store) -> Result<ManagedOutcome> {
     })
 }
 
-fn snapshot(directory: &Path, journal: &Journal, candidates: bool) -> Result<Snapshot> {
+fn snapshot(directory: &Path, journal: &Journal) -> Result<Snapshot> {
     let mut resources: BTreeMap<_, _> = history::resource_inventory()
         .into_iter()
         .map(|leaf| (leaf, None))
         .collect();
     let mut metadata = None;
     for (index, asset) in journal.assets.iter().enumerate() {
-        let candidate = candidates && asset.candidate_sha256 != sha256(b"");
-        let hash = if candidate {
-            Some(&asset.candidate_sha256)
-        } else {
-            asset.original_sha256.as_ref()
-        };
-        let Some(hash) = hash else {
+        let Some(hash) = asset.original_sha256.as_ref() else {
             continue;
         };
-        let path = directory.join(format!(
-            "{}-{index}.bin",
-            if candidate { "candidate" } else { "original" }
-        ));
-        let blob = Blob::existing(path, hash)?;
-        if candidate {
-            Blob::existing(
-                directory.join(format!("observed-candidate-{index}.bin")),
-                hash,
-            )?;
-        }
+        let blob = Blob::existing(directory.join(format!("original-{index}.bin")), hash)?;
         if asset.leaf == "pass.json" {
             metadata = Some(blob);
         } else {
@@ -127,106 +108,6 @@ fn snapshot(directory: &Path, journal: &Journal, candidates: bool) -> Result<Sna
     };
     snapshot.validate()?;
     Ok(snapshot)
-}
-
-fn import_legacy(store: &mut Store, recovery: Option<&Path>, directory: &Path) -> Result<()> {
-    if store.index.expected.is_some() || store.index.head.is_some() {
-        return Ok(());
-    }
-    let Some(recovery) = recovery else {
-        return Ok(());
-    };
-    let journal = load(recovery)?;
-    ensure!(
-        journal.binding == store.index.binding
-            && journal.roots.is_empty()
-            && journal.kind.is_installation()
-            && journal.kind != JournalKind::ManagedTransition
-            && journal.status == "ParallaxCandidateReadbackMatchedAwaitingManualObservation",
-        "Legacy recovery has no proven completed installation to import"
-    );
-    let source = snapshot(recovery, &journal, false)?;
-    let target = snapshot(recovery, &journal, true)?;
-    ensure!(
-        transition::selection(&target.metadata.read()?)?.is_some(),
-        "Unsupported legacy candidate configuration"
-    );
-    let pack = artwork::load_deployment(
-        &recovery
-            .parent()
-            .context("Legacy recovery has no application directory")?
-            .join("pack"),
-    )?;
-    ensure!(
-        journal.kind.particles() == pack.contains_emitter
-            && journal.kind.transaction() == pack.contains_transaction
-            && journal.kind.cross_dissolve() == pack.contains_cross_dissolve,
-        "Legacy effect inventory differs from its pack"
-    );
-    ensure!(
-        journal.trial_pack_sha256.as_ref() == Some(&pack.manifest_sha256)
-            && pack.original_metadata == source.metadata.read()?
-            && pack.candidate_metadata == target.metadata.read()?,
-        "Legacy pack no longer matches the verified journal"
-    );
-    for resource in &pack.resources {
-        let leaf = &resource.filename;
-        if leaf == "transactionEffectShape.svg" {
-            ensure!(
-                target.resources[leaf]
-                    .as_ref()
-                    .is_some_and(|blob| blob.sha256 == sha256(&resource.bytes)),
-                "Legacy SVG differs from its pack"
-            );
-        } else {
-            let base = leaf
-                .strip_suffix(".png")
-                .context("Unexpected legacy raster resource")?;
-            for scale in ["", "@2x", "@3x"] {
-                ensure!(
-                    target.resources[&format!("{base}{scale}.png")]
-                        .as_ref()
-                        .is_some_and(|blob| blob.sha256 == sha256(&resource.bytes)),
-                    "Legacy PNG differs from its pack"
-                );
-            }
-        }
-    }
-    let imported = directory.join("legacy-history");
-    fs::create_dir(&imported)?;
-    // Import is entirely local. Publish its head atomically after the immutable
-    // record is complete; an interrupted local import must not replace the
-    // operator's existing legacy recovery selection with an empty pending entry.
-    store.index.pending = Some(imported.clone());
-    let changes = journal
-        .assets
-        .iter()
-        .filter(|asset| asset.leaf != "pass.json" && asset.candidate_sha256 != sha256(b""))
-        .map(|asset| transition::Change {
-            leaf: asset.leaf.clone(),
-            expected_preimage: source.resources[&asset.leaf]
-                .as_ref()
-                .map(|blob| blob.sha256.clone()),
-            after: target.resources[&asset.leaf].clone().unwrap(),
-            disposition: transition::Disposition::Install,
-        })
-        .collect();
-    let operation = Operation {
-        schema_version: 2,
-        mode: Mode::Import,
-        source,
-        target,
-        previous_head: None,
-        next_head: None,
-        inert: Default::default(),
-        changes,
-        policy: TrialPolicy::default(),
-        recovery: recovery.to_owned(),
-    };
-    let reference = store.freeze_operation(&imported, &operation)?;
-    history::set_phase(&reference, Phase::Verified)?;
-    store.commit(&reference)?;
-    Ok(())
 }
 
 fn frozen_inputs(desired: &DesiredEffects, directory: &Path) -> Result<DesiredEffects> {
@@ -352,7 +233,6 @@ pub(crate) fn managed_apply(
     desired: DesiredEffects,
     alignment: artwork::Alignment,
     directory: &Path,
-    legacy: Option<PathBuf>,
     progress: impl Fn(&str),
 ) -> Result<ManagedOutcome> {
     // Standalone nonempty native rendering remains an explicit validation gate.
@@ -379,7 +259,6 @@ pub(crate) fn managed_apply(
         store.index.pending.is_none(),
         "Recover the pending managed operation first"
     );
-    import_legacy(&mut store, legacy.as_deref(), directory)?;
     let selected = desired.selection;
     let policy = TrialPolicy {
         particles: selected.particles && experimental_particles_enabled(),
@@ -415,7 +294,6 @@ pub(crate) fn managed_apply(
 pub(crate) fn managed_restore(
     binding: Binding,
     baseline: bool,
-    legacy: Option<PathBuf>,
     progress: impl Fn(&str),
 ) -> Result<ManagedOutcome> {
     let _lock = DeviceLock::acquire(&binding)?;
@@ -429,7 +307,6 @@ pub(crate) fn managed_restore(
         return recover(&mut store, progress);
     }
     let directory = new_application_directory()?;
-    import_legacy(&mut store, legacy.as_deref(), &directory)?;
     let (target, next) = if baseline {
         ensure!(
             store.index.baseline_restore_available,
@@ -470,15 +347,13 @@ pub(crate) fn managed_restore(
     )
 }
 
-/// Explicit all-off operation independent of draft inputs and baseline ancestry.
-/// Saved artwork is a separate backup contract, never fabricated factory metadata.
+/// Saved artwork is a separate backup, never fabricated factory metadata.
 pub(crate) fn managed_reset(
     binding: Binding,
     saved_original: bool,
     background: Option<PathBuf>,
     alignment: artwork::Alignment,
     directory: &Path,
-    legacy: Option<PathBuf>,
     progress: impl Fn(&str),
 ) -> Result<ManagedOutcome> {
     let _lock = DeviceLock::acquire(&binding)?;
@@ -501,7 +376,6 @@ pub(crate) fn managed_reset(
         store.index.pending.is_none(),
         "Recover the pending managed operation first"
     );
-    import_legacy(&mut store, legacy.as_deref(), directory)?;
     run(
         &mut store,
         directory,
@@ -537,8 +411,7 @@ fn prepare_reset_background(
     let Some(background) = background else {
         return Ok(None);
     };
-    // Reset selects only the background. Stale/invalid emitter or foreground
-    // drafts never participate, and selected bytes freeze before device capture.
+    // Reset selects only the background.
     let mut desired = DesiredEffects::default();
     desired.inputs.background = Some(background);
     let frozen = frozen_inputs(&desired, directory)?;
@@ -558,13 +431,9 @@ fn run(
     let mut source_snapshot = None;
     let operation = (|| -> Result<()> {
         progress("Backing up current card metadata and artwork…");
-        capture_metadata_for_binding(
-            &recovery,
-            store.index.binding.clone(),
-            JournalKind::MetadataCrossDissolveTransactionParticleCapture,
-        )?;
+        capture_metadata_for_binding(&recovery, store.index.binding.clone())?;
         needs_recovery = false;
-        let source = snapshot(&recovery, &load(&recovery)?, false)?;
+        let source = snapshot(&recovery, &load(&recovery)?)?;
         source_snapshot = Some(source.clone());
         let (plan, next) = build(&source, store)?;
         if plan.is_noop(&source) && mode == Mode::Apply {
@@ -677,7 +546,7 @@ fn install_managed(reference: &history::Reference, needs_recovery: &mut bool) ->
         journal.assets[index].candidate_sha256 = sha256(bytes);
     }
     journal.kind = JournalKind::ManagedTransition;
-    journal.trial_pack_sha256 = Some(reference.sha256.clone());
+    journal.transition_sha256 = Some(reference.sha256.clone());
     journal.allow_missing_particle_originals = operation.policy.particles;
     journal.allow_missing_transaction_originals = operation.policy.transaction;
     journal.allow_missing_cross_dissolve_originals = operation.policy.cross_dissolve;
@@ -787,7 +656,7 @@ fn recover(store: &mut Store, progress: impl Fn(&str)) -> Result<ManagedOutcome>
             "Pending capture binding differs"
         );
         if store.index.expected.is_none() {
-            store.index.expected = Some(snapshot(&directory.join("recovery"), journal, false)?);
+            store.index.expected = Some(snapshot(&directory.join("recovery"), journal)?);
         }
         store.abort_after_verified_recovery()?;
         let mut status = outcome(store)?;
@@ -804,7 +673,7 @@ fn recover(store: &mut Store, progress: impl Fn(&str)) -> Result<ManagedOutcome>
         let mut journal = load(&operation.recovery)?;
         ensure!(
             journal.binding == store.index.binding
-                && journal.trial_pack_sha256.as_ref() == Some(&reference.sha256),
+                && journal.transition_sha256.as_ref() == Some(&reference.sha256),
             "Incomplete target is not bound to its recovery journal"
         );
         let (session, mut afc) = open(&journal.binding)?;
@@ -833,7 +702,7 @@ fn recover(store: &mut Store, progress: impl Fn(&str)) -> Result<ManagedOutcome>
         let candidate_verified = journal.status
             == "ParallaxCandidateReadbackMatchedAwaitingManualObservation"
             && (journal.kind != JournalKind::ManagedTransition
-                || journal.trial_pack_sha256.as_ref() == Some(&reference.sha256));
+                || journal.transition_sha256.as_ref() == Some(&reference.sha256));
         let unchanged_verified = !journal.kind.is_installation()
             && installation_ready(&journal)
             && operation.changes.is_empty()
@@ -862,7 +731,7 @@ fn recover(store: &mut Store, progress: impl Fn(&str)) -> Result<ManagedOutcome>
                 && store.index.head == operation.previous_head,
             "Recovered source does not match managed history"
         );
-        let restored = snapshot(&directory.join("recovery"), journal, false)?;
+        let restored = snapshot(&directory.join("recovery"), journal)?;
         transition::reconcile(&restored, &operation.source)?;
         if store.index.expected.is_none() {
             store.index.expected = Some(restored);
@@ -907,7 +776,7 @@ fn recover(store: &mut Store, progress: impl Fn(&str)) -> Result<ManagedOutcome>
             history::set_phase(reference, Phase::Recovered)?;
         }
         if store.index.expected.is_none() && has_captured_metadata(&journal) {
-            store.index.expected = Some(snapshot(&recovery, &journal, false)?);
+            store.index.expected = Some(snapshot(&recovery, &journal)?);
         }
     }
     store.abort_after_verified_recovery()?;
@@ -940,7 +809,7 @@ mod tests {
         let mut journal = super::super::tests::recovery_capture_fixture();
         journal.kind = JournalKind::ManagedTransition;
         journal.binding = fixture.binding.clone();
-        journal.trial_pack_sha256 = Some(sha256(b"managed-manifest"));
+        journal.transition_sha256 = Some(sha256(b"managed-manifest"));
         journal.assets = inventory(&journal.kind)
             .into_iter()
             .map(|leaf| Asset {
@@ -1066,7 +935,7 @@ mod tests {
             "backgroundParallax@3x.png".into(),
             Some(fixture.blob(&bytes)),
         );
-        // The fixture fallback is deliberately not an image: any use of the
+        // The fixture fallback is deliberately not an image. Any use of the
         // flattened fallback would fail rather than silently retaining an overlay.
         let directory = fixture.directory();
         let assets =
@@ -1116,98 +985,5 @@ mod tests {
         assert!(!result.pending && !result.verified);
         assert!(store.index.head.is_none() && store.index.expected.is_some());
         assert_eq!(fs::read(recovery.join("journal.json")).unwrap(), previous);
-    }
-
-    #[test]
-    fn legacy_import_checks_pack_and_readbacks_and_does_not_invent_ancestry() {
-        for preexisting in [false, true] {
-            let fixture = Fixture::new();
-            let app = fixture.directory();
-            let back = app.join("back.png");
-            let front = app.join("front.png");
-            image::RgbaImage::from_pixel(32, 20, image::Rgba([30, 40, 50, 255]))
-                .save(&back)
-                .unwrap();
-            let mut pixels = image::RgbaImage::new(32, 20);
-            pixels.put_pixel(16, 10, image::Rgba([250, 200, 100, 230]));
-            pixels.save(&front).unwrap();
-            let selected = Selection {
-                parallax: true,
-                ..Default::default()
-            };
-            let mut metadata = serde_json::json!({"serialNumber":"legacy"});
-            if preexisting {
-                metadata["dynamicLayerConfiguration"] =
-                    serde_json::to_value(selected.native_configuration().unwrap()).unwrap();
-            }
-            let original = serde_json::to_vec(&metadata).unwrap();
-            let pass = app.join("pass.json");
-            fs::write(&pass, &original).unwrap();
-            let config = artwork::PrepareConfig {
-                schema_version: 1,
-                parallax_bleed: true,
-                dynamic_layer_configuration: selected.native_configuration().unwrap(),
-                background: back,
-                foreground: front,
-                emitter_sprite: None,
-                alternate_background: None,
-                transaction_sprite: None,
-                transaction_shape: None,
-                original_pass_json: pass,
-                output_directory: app.join("pack"),
-                canvas: Default::default(),
-                alignment: Default::default(),
-            };
-            artwork::prepare_configuration(&config, Path::new(".")).unwrap();
-            let deployment = artwork::load_deployment(&app.join("pack")).unwrap();
-            let recovery = app.join("recovery");
-            fs::create_dir(&recovery).unwrap();
-            let mut journal = super::super::tests::recovery_capture_fixture();
-            journal.kind = JournalKind::MetadataParallax;
-            journal.binding = fixture.binding.clone();
-            journal.status = "ParallaxCandidateReadbackMatchedAwaitingManualObservation".into();
-            journal.trial_pack_sha256 = Some(deployment.manifest_sha256.clone());
-            for (index, asset) in journal.assets.iter_mut().enumerate() {
-                asset.candidate_sha256 = sha256(b"");
-                if asset.original_sha256.is_some() {
-                    let bytes = if index == 3 {
-                        original.as_slice()
-                    } else {
-                        b"immutable legacy original"
-                    };
-                    fs::write(recovery.join(format!("original-{index}.bin")), bytes).unwrap();
-                    asset.original_sha256 = Some(sha256(bytes));
-                }
-                let base = asset.leaf.replace("@2x", "").replace("@3x", "");
-                let candidate = if index == 3 {
-                    Some(deployment.candidate_metadata.as_slice())
-                } else {
-                    deployment
-                        .resources
-                        .iter()
-                        .find(|resource| resource.filename == base)
-                        .map(|resource| resource.bytes.as_slice())
-                };
-                if let Some(bytes) = candidate {
-                    fs::write(recovery.join(format!("candidate-{index}.bin")), bytes).unwrap();
-                    fs::write(
-                        recovery.join(format!("observed-candidate-{index}.bin")),
-                        bytes,
-                    )
-                    .unwrap();
-                    asset.candidate_sha256 = sha256(bytes);
-                }
-            }
-            save(&recovery, &journal).unwrap();
-            let before = fs::read(recovery.join("journal.json")).unwrap();
-            let mut store = fixture.store();
-            import_legacy(&mut store, Some(&recovery), &fixture.directory()).unwrap();
-            assert!(store.index.head.is_some() && store.index.pending.is_none());
-            assert_eq!(store.index.baseline_restore_available, !preexisting);
-            assert_eq!(fs::read(recovery.join("journal.json")).unwrap(), before);
-            fs::write(recovery.join("observed-candidate-3.bin"), b"tampered").unwrap();
-            let mut other = Store::open(fixture.root.join("other.json"), &fixture.binding).unwrap();
-            assert!(import_legacy(&mut other, Some(&recovery), &fixture.directory()).is_err());
-        }
     }
 }

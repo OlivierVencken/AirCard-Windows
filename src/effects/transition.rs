@@ -1,5 +1,3 @@
-//! Pure transitions. Unknown export slots never establish protected-file absence.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
@@ -36,7 +34,7 @@ impl TrialPolicy {
         ensure!(
             !self.cross_dissolve
                 || (selection.cross_dissolve && !selection.particles && !selection.transaction),
-            "Alternate-original trial retains its historical standalone scope"
+            "Alternate-original trial cannot combine other effect exceptions"
         );
         Ok(())
     }
@@ -150,8 +148,8 @@ pub(super) fn reconcile(source: &Snapshot, expected: &Snapshot) -> Result<()> {
     Ok(())
 }
 
-/// `expected` is supplied only by validated managed history or an imported,
-/// verified legacy journal, never by a draft or metadata resemblance.
+/// `expected` is supplied only by validated managed history, never by a draft
+/// or metadata resemblance.
 pub(super) fn apply(
     source: &Snapshot,
     expected: Option<&Snapshot>,

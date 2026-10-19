@@ -1,4 +1,3 @@
-//! Restricted, bounded SVG paths for Wallet's first-child emitter shape contract.
 use anyhow::{Context, Result, ensure};
 use quick_xml::{Reader, events::Event};
 use svgtypes::{PathParser, PathSegment, SimplePathSegment as Segment, SimplifyingPathParser};
@@ -8,10 +7,8 @@ const MAX_PATH_SEGMENTS: usize = 4096;
 const MAX_PATH_NUMBER: f64 = 16.0 * 8192.0;
 
 pub(super) struct Shape {
-    /// Normalized outline for inspection only, never a native animation simulation.
+    /// Normalized outline for inspection.
     pub contours: Vec<Vec<[f32; 2]>>,
-    pub width: f64,
-    pub height: f64,
 }
 
 pub(super) fn validate(bytes: &[u8]) -> Result<Shape> {
@@ -205,11 +202,7 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Shape> {
             .any(|c| c.windows(2).any(|p| visible_segment(p[0], p[1]))),
         "Transaction SVG outline is outside its canvas"
     );
-    Ok(Shape {
-        contours,
-        width,
-        height,
-    })
+    Ok(Shape { contours })
 }
 
 /// Clip sampled outline edges against the unit canvas. An isolated move inside

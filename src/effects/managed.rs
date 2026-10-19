@@ -1,6 +1,3 @@
-//! Checksum-bound managed history. Originals and completed manifests are immutable;
-//! only the separate index and operation phase journal change atomically.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -74,7 +71,7 @@ pub(super) struct Snapshot {
 }
 
 pub(super) fn resource_inventory() -> BTreeSet<String> {
-    recovery::inventory(&JournalKind::MetadataCrossDissolveTransactionParticles)
+    recovery::inventory(&JournalKind::ManagedTransition)
         .into_iter()
         .filter(|leaf| leaf != "pass.json")
         .collect()
@@ -118,7 +115,6 @@ pub(super) enum Mode {
     Apply,
     Undo,
     Baseline,
-    Import,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -261,6 +257,7 @@ fn atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
+    drop(file);
     recovery::durable_replace(&temporary, path)
 }
 
@@ -387,7 +384,7 @@ impl Store {
 
     /// Per-resource origins come from the first proven write in the active
     /// chain. An Unknown first preimage stays Unknown even if a later capture
-    /// recovers matching candidate bytes. Earlier snapshots are never rewritten.
+    /// recovers matching candidate bytes.
     pub fn resource_baseline(&self) -> Result<Option<Snapshot>> {
         let Some(mut baseline) = self.index.baseline.clone() else {
             return Ok(None);
@@ -478,7 +475,7 @@ impl Store {
             "Managed operation has not been verified"
         );
         let operation = load_operation(reference, &self.index.binding)?;
-        let is_apply = matches!(operation.mode, Mode::Apply | Mode::Import);
+        let is_apply = operation.mode == Mode::Apply;
         let next_head = if is_apply {
             Some(reference.clone())
         } else {
@@ -551,14 +548,12 @@ impl Operation {
             );
             change.after.read()?;
         }
-        if self.mode != Mode::Import {
-            for (leaf, target) in &self.target.resources {
-                if !names.contains(leaf) {
-                    ensure!(
-                        self.source.resources[leaf] == *target,
-                        "Unjournaled resource change: {leaf}"
-                    );
-                }
+        for (leaf, target) in &self.target.resources {
+            if !names.contains(leaf) {
+                ensure!(
+                    self.source.resources[leaf] == *target,
+                    "Unjournaled resource change: {leaf}"
+                );
             }
         }
         ensure!(

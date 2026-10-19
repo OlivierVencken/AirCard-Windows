@@ -123,9 +123,6 @@ impl Language {
             "Undo last apply" => "撤销上次应用",
             "Recover interrupted operation" => "恢复中断的操作",
             "Restore before AirCard effects" => "恢复至 AirCard 效果之前",
-            "Baseline restore needs verified history and transition support." => {
-                "恢复初始状态需要已验证的历史记录和效果切换支持。"
-            }
             "Wait for the current operation to finish." => "请等待当前操作完成。",
             "Effects require one iPhone connected by USB only." => {
                 "效果操作需要仅通过 USB 连接一台 iPhone。"
@@ -136,17 +133,8 @@ impl Language {
             "Another card on this device needs recovery. Select that card in Wallet." => {
                 "此设备上的另一张卡片需要恢复。请在钱包中选择该卡片。"
             }
-            "Removing effects needs transition support. Undo remains available." => {
-                "移除效果需要效果切换支持。仍可撤销上次应用。"
-            }
-            "Standalone effects and turning effects off need transition support before applying." => {
-                "独立效果及关闭效果需要效果切换支持后才能应用。"
-            }
+            "Parallax preview requires parallax" => "视差预览需要启用视差效果",
             "Wait for a valid static preview before applying." => "请等待有效的静态预览后再应用。",
-            "Legacy inputs are unbound. Import them explicitly for this card." => {
-                "旧版图像尚未绑定卡片。请手动导入至此卡片。"
-            }
-            "Use legacy inputs for this card" => "为此卡片使用旧版图像",
             "Choose background..." => "选择背景...",
             "Effects artwork and crop are saved separately from Wallet." => {
                 "效果图像及裁剪位置与钱包单独保存。"
@@ -225,16 +213,9 @@ impl Language {
             "SVG path must start with a move command" => "SVG 路径必须以移动命令开始",
             "Transaction SVG has no visible outline" => "交易 SVG 没有可见轮廓",
             "Transaction SVG outline is outside its canvas" => "交易 SVG 轮廓位于画布之外",
-            "Overlay" => "叠加图层",
             "Cross-dissolve" => "交叉溶解",
             "Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind." => {
                 "实验性试用：允许缺少备用图案原件。恢复后可能仍保留备用效果文件。"
-            }
-            "Experimental skin applied and bytes verified. Effect-file recovery is incomplete. Reopen Wallet and Apple Pay and check the effects." => {
-                "实验性皮肤已应用并验证字节。效果文件无法完整恢复。请重新打开 Wallet 和 Apple Pay 并检查效果。"
-            }
-            "Known originals restored and verified. Recovery is incomplete: effect files may remain. Reopen Wallet and Apple Pay and check appearance." => {
-                "已恢复并验证已知原件。恢复不完整：效果文件可能仍然存在。请重新打开 Wallet 和 Apple Pay 并检查外观。"
             }
             "Choose Alternate Background..." => "选择备用背景...",
             "Choose an alternate background image for cross-dissolve" => {
@@ -276,7 +257,9 @@ impl Language {
             "Apply an overlay once to create a recovery backup." => {
                 "应用一次叠加图层以创建恢复备份。"
             }
-            "Overlay worker stopped unexpectedly" => "叠加图层工作线程意外停止",
+            "Effects worker stopped unexpectedly. Use Recover interrupted operation if recovery is available." => {
+                "效果工作线程意外停止。如有恢复记录，请使用“恢复中断的操作”。"
+            }
             "Card" => "卡片",
             "Select a card" => "选择卡片",
             "Use an opaque background and a transparent foreground. Images are fitted to the card automatically." => {
@@ -289,16 +272,12 @@ impl Language {
             "Backing up current card metadata and artwork…" => "正在备份当前卡片数据和图片…",
             "Recovering previous card data…" => "正在恢复之前的卡片数据…",
             "Restoring previous skin…" => "正在恢复之前的皮肤…",
-            "Restore previous skin" => "恢复之前的皮肤",
             "Apply backs up current card data automatically." => "应用前会自动备份当前卡片数据。",
             "Select a saved card and connect one iPhone by USB. Use the Wallet tab to scan a new card." => {
                 "选择已保存的卡片并通过 USB 连接一台 iPhone。可在钱包选项卡扫描新卡片。"
             }
             "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." => {
                 "皮肤已应用。强制关闭并重新打开钱包和 Apple Pay 以查看效果。"
-            }
-            "Previous skin restored. Force-close and reopen Wallet and Apple Pay." => {
-                "之前的皮肤已恢复。请强制关闭并重新打开钱包和 Apple Pay。"
             }
             "Background PNG" => "背景 PNG",
             "Foreground PNG" => "前景 PNG",

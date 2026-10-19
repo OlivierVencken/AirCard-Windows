@@ -1,8 +1,3 @@
-//! Desired state and local resource planning. A plan is not installation authority.
-//!
-//! Standalone modes remain gated by native validation and the transition/recovery
-//! work. Legacy frozen packs and their mandatory-parallax validation are unchanged.
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -99,7 +94,6 @@ impl Resource {
         }
     }
 
-    /// Current delivery candidates, not proof of absence of PDF/suffixed assets.
     pub fn candidate_filenames(self) -> Vec<String> {
         let base = self.basename();
         if self == Self::TransactionShape {
@@ -120,8 +114,6 @@ pub(super) struct Requirements {
     pub needs_static_foreground_validation: bool,
 }
 
-/// Inputs survive toggles. `None` means request verified captured current artwork;
-/// it never means the ordinary card PDF automatically serves as a dynamic layer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Inputs {
@@ -143,7 +135,7 @@ pub(super) struct DesiredEffects {
 
 impl DesiredEffects {
     /// Selection completeness only. Decode, alpha, SVG, crop, frozen-byte and
-    /// capture verification remain mandatory in the eventual pack builder.
+    /// capture verification remain mandatory during managed installation.
     pub fn validate_selected_inputs(&self) -> Result<()> {
         let enabled = self.selection;
         if enabled.is_empty() {
