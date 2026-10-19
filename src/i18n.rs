@@ -55,13 +55,124 @@ impl Language {
         }
 
         match source {
-            "Particles (experimental)" => "粒子（实验性）",
+            "Remove all effects" => "移除所有效果",
+            "Reset to saved original artwork" => "恢复保存的原始卡面",
+            "If baseline history is incomplete, you can still remove all managed effects below." => {
+                "如果初始历史不完整，仍可使用下方操作移除所有托管效果。"
+            }
+            "Remove all effects uses the selected background and crop. With no artwork selected, it uses the recovered background without the overlay. Reset restores saved original artwork when available." => {
+                "移除所有效果会使用选定的背景及裁剪。未选择图像时，使用不含叠加层的已恢复背景。有原始备份时，还可恢复保存的原始卡面。"
+            }
+            "No complete original artwork backup is available. Remove effects first, then use Wallet artwork controls. A factory reset cannot be reconstructed from missing originals." => {
+                "没有完整的原始卡面备份。请先移除效果，再使用钱包中的图像控件。缺少原始文件时无法重建出厂状态。"
+            }
+            "Unknown original effect files may remain. Incomplete cleanup retains recovery and blocks further writes; protected-file deletion is not proven." => {
+                "原始内容未知的效果文件可能保留。清理不完整时会保留恢复记录并阻止后续写入；尚未证实能删除受保护文件。"
+            }
+            "Saved original artwork and effects removal verified. Reopen Wallet and Apple Pay and check appearance." => {
+                "已验证保存的原始卡面和效果移除数据。请重新打开钱包和 Apple Pay 并检查显示效果。"
+            }
+            "Effects removal and background artwork bytes verified. Reopen Wallet and Apple Pay and check appearance." => {
+                "已验证效果移除及背景图像数据。请重新打开钱包和 Apple Pay 并检查显示效果。"
+            }
+            "This card has managed effects or pending recovery. In Effects, use Remove all effects or recover the interrupted operation before ordinary artwork changes." => {
+                "此卡片有托管效果或待处理恢复。请先在效果中移除所有效果或恢复中断的操作，再修改普通卡面。"
+            }
+            "Saved effects data could not be validated. Copy error details before proceeding." => {
+                "无法验证保存的效果数据。请先复制错误详情再继续。"
+            }
+            "No artwork selection is required for removal. All-off keeps ordinary artwork, or uses the recovered background layer without the overlay." => {
+                "移除效果无需选择图像。关闭效果会保留普通图像；已安装效果时使用不含叠加层的已恢复背景图层。"
+            }
+            "Local pending operation cleared. Device state has not been verified." => {
+                "本地待处理操作已清除。尚未验证设备状态。"
+            }
+            "Use current card artwork for all-off" => "关闭效果时使用当前卡片图像",
+            "Standalone native effects still need phone validation" => {
+                "独立原生效果仍需在手机上验证"
+            }
+            "Baseline restore is available only when its ancestry is proven." => {
+                "仅在历史来源可验证时才能恢复初始状态。"
+            }
+            "Managed recovery is incomplete. Files may remain; keep the recovery selection and check the phone." => {
+                "托管恢复不完整。文件可能仍然保留；请保留恢复记录并检查手机。"
+            }
+            "Effects bytes verified. Reopen Wallet and Apple Pay and check appearance." => {
+                "效果文件已验证。请重新打开钱包及 Apple Pay 并检查显示效果。"
+            }
+            "Previous managed state verified. Reopen Wallet and Apple Pay and check appearance." => {
+                "先前的托管状态已验证。请重新打开钱包及 Apple Pay 并检查显示效果。"
+            }
+            "Baseline bytes restored and verified. Reopen Wallet and Apple Pay and check appearance." => {
+                "初始文件已恢复并验证。请重新打开钱包及 Apple Pay 并检查显示效果。"
+            }
+            "Effects" => "效果",
+            "Open Effects" => "打开效果",
+            "Go to Wallet" => "前往钱包",
+            "Configuration" => "配置",
+            "Preview" => "预览",
+            "Move your mouse over the card to tilt." => "在卡片上移动鼠标以模拟倾斜。",
+            "Local simulation. Motion and particle timing may differ on iPhone." => "本地模拟。iPhone 上的运动和粒子时序可能不同。",
+            "Play transaction" => "播放交易动画",
+            "No valid composition yet" => "尚无有效合成预览",
+            "Artwork only. Native motion and payment animation run on the phone." => {
+                "仅预览图像；原生动态效果和付款动画在手机上运行。"
+            }
+            "Select a card and device in Wallet first." => "请先在钱包中选择卡片和设备。",
+            "Draft changes do not change the phone until you apply." => {
+                "草稿更改仅在应用后才会写入手机。"
+            }
+            "Turn off effects" => "关闭效果",
+            "Undo last apply" => "撤销上次应用",
+            "Recover interrupted operation" => "恢复中断的操作",
+            "Restore before AirCard effects" => "恢复至 AirCard 效果之前",
+            "Wait for the current operation to finish." => "请等待当前操作完成。",
+            "Effects require one iPhone connected by USB only." => {
+                "效果操作需要仅通过 USB 连接一台 iPhone。"
+            }
+            "Recover the interrupted operation before applying again." => {
+                "请先恢复中断的操作，再次应用。"
+            }
+            "Another card on this device needs recovery. Select that card in Wallet." => {
+                "此设备上的另一张卡片需要恢复。请在钱包中选择该卡片。"
+            }
+            "Parallax preview requires parallax" => "视差预览需要启用视差效果",
+            "Wait for a valid static preview before applying." => "请等待有效的静态预览后再应用。",
+            "Choose background..." => "选择背景...",
+            "Effects artwork and crop are saved separately from Wallet." => {
+                "效果图像及裁剪位置与钱包单独保存。"
+            }
+            "Use Wallet artwork and crop" => "使用钱包图像及裁剪位置",
+            "Crop X" => "水平裁剪",
+            "Crop Y" => "垂直裁剪",
+            "Parallax" => "视差",
+            "Last verified apply (device not rechecked)" => "上次已验证的应用（尚未重新检查设备）",
+            "Keep" => "保留",
+            "Add" => "添加",
+            "Remove" => "移除",
+            "Off" => "关闭",
+            "Installed effects have not been checked. Apply verifies captured metadata." => {
+                "尚未检查已安装的效果。应用时将验证捕获的元数据。"
+            }
+            "This card has effects history. Use Effects recovery; ordinary writes need effects removal support." => {
+                "此卡片存在效果历史。请在效果中恢复；普通写入需要效果移除支持。"
+            }
+            "An expanding particle outline during payment results. Preview is static." => {
+                "付款结果显示时播放扩大的粒子轮廓。预览为静态。"
+            }
+            "Particles" => "粒子",
             "Choose Particle PNG..." => "选择粒子 PNG...",
             "Choose a transparent particle PNG" => "请选择透明粒子 PNG",
-            "Experimental trial: particle originals may be unknown. Restore may leave the three neutral emitter PNGs behind." => "实验性试用：粒子原件可能未知。恢复后可能仍保留三个中性发射器 PNG 文件。",
-            "Native twinkling at low density, physics off. Preview is static." => "原生低密度闪烁，关闭物理效果。预览为静态。",
-            "Transaction effect (experimental)" => "交易效果（实验性）",
-            "Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind." => "实验性试用：交易效果原件可能未知。恢复后可能仍保留三个发射器 PNG 和轮廓 SVG 文件。",
+            "Experimental trial: particle originals may be unknown. Restore may leave the three neutral emitter PNGs behind." => {
+                "实验性试用：粒子原件可能未知。恢复后可能仍保留三个中性发射器 PNG 文件。"
+            }
+            "Native twinkling at low density, physics off. Preview is static." => {
+                "原生低密度闪烁，关闭物理效果。预览为静态。"
+            }
+            "Transaction effect" => "交易效果",
+            "Experimental trial: transaction originals may be unknown. Restore may leave the three emitter PNGs and shape SVG behind." => {
+                "实验性试用：交易效果原件可能未知。恢复后可能仍保留三个发射器 PNG 和轮廓 SVG 文件。"
+            }
             "An expanding particle outline during payment results. Phone playback is not yet validated." => {
                 "付款结果显示时播放扩大的粒子轮廓。尚未在手机上验证播放效果。"
             }
@@ -105,25 +216,40 @@ impl Language {
             "SVG path must start with a move command" => "SVG 路径必须以移动命令开始",
             "Transaction SVG has no visible outline" => "交易 SVG 没有可见轮廓",
             "Transaction SVG outline is outside its canvas" => "交易 SVG 轮廓位于画布之外",
-            "Overlay" => "叠加图层",
             "Cross-dissolve" => "交叉溶解",
-            "Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind." => "实验性试用：允许缺少备用图案原件。恢复后可能仍保留备用效果文件。",
-            "Experimental skin applied and bytes verified. Effect-file recovery is incomplete. Reopen Wallet and Apple Pay and check the effects." => "实验性皮肤已应用并验证字节。效果文件无法完整恢复。请重新打开 Wallet 和 Apple Pay 并检查效果。",
-            "Known originals restored and verified. Recovery is incomplete: effect files may remain. Reopen Wallet and Apple Pay and check appearance." => "已恢复并验证已知原件。恢复不完整：效果文件可能仍然存在。请重新打开 Wallet 和 Apple Pay 并检查外观。",
+            "Experimental trial: missing alternate originals are allowed. Restore may leave alternate effect files behind." => {
+                "实验性试用：允许缺少备用图案原件。恢复后可能仍保留备用效果文件。"
+            }
             "Choose Alternate Background..." => "选择备用背景...",
-            "Choose an alternate background image for cross-dissolve" => "请选择用于交叉溶解的备用背景图片",
-            "The alternate background shows at rest; tilt reveals the base artwork." => "静止时显示备用背景；倾斜时显示基础图像。",
+            "Choose an alternate background image for cross-dissolve" => {
+                "请选择用于交叉溶解的备用背景图片"
+            }
+            "The alternate background shows at rest; tilt reveals the base artwork." => {
+                "静止时显示备用背景；倾斜时显示基础图像。"
+            }
             "Base artwork" => "基础图案",
             "Alternate artwork" => "备用图案",
-            "Preview shows artwork only; the static fallback uses the base artwork." => "预览仅展示图案；静态回退使用基础图案。",
+            "Preview shows artwork only; the static fallback uses the base artwork." => {
+                "预览仅展示图案；静态回退使用基础图案。"
+            }
             "Choose Overlay..." => "选择叠加图层...",
-            "Choose a transparent PNG overlay. The image above is the background." => "选择透明 PNG 叠加图层。上方所选图片用作背景。",
+            "Choose a transparent PNG overlay. The image above is the background." => {
+                "选择透明 PNG 叠加图层。上方所选图片用作背景。"
+            }
             "Choose an image and overlay" => "选择图片和叠加图层",
             "Invalid overlay" => "叠加图层无效",
-            "This overlay has no transparency. Choose a PNG with a transparent background." => "此叠加图层没有透明区域。请选择具有透明背景的 PNG。",
-            "The crop removes all overlay transparency. Adjust the crop or choose another overlay." => "裁切移除了叠加图层的所有透明区域。请调整裁切或选择其他叠加图层。",
-            "This overlay is fully transparent and has no visible artwork. Choose another PNG." => "此叠加图层完全透明，没有可见图案。请选择其他 PNG。",
-            "The visible overlay is outside the crop. Adjust the crop or choose another overlay." => "叠加图层的可见图案位于裁切范围之外。请调整裁切或选择其他叠加图层。",
+            "This overlay has no transparency. Choose a PNG with a transparent background." => {
+                "此叠加图层没有透明区域。请选择具有透明背景的 PNG。"
+            }
+            "The crop removes all overlay transparency. Adjust the crop or choose another overlay." => {
+                "裁切移除了叠加图层的所有透明区域。请调整裁切或选择其他叠加图层。"
+            }
+            "This overlay is fully transparent and has no visible artwork. Choose another PNG." => {
+                "此叠加图层完全透明，没有可见图案。请选择其他 PNG。"
+            }
+            "The visible overlay is outside the crop. Adjust the crop or choose another overlay." => {
+                "叠加图层的可见图案位于裁切范围之外。请调整裁切或选择其他叠加图层。"
+            }
             "Loading overlay preview…" => "正在加载叠加图层预览…",
             "Preparing overlay…" => "正在准备叠加图层…",
             "Preparing overlay skin…" => "正在准备叠加图层皮肤…",
@@ -131,8 +257,12 @@ impl Language {
             "connect one iPhone by USB" => "通过 USB 连接一台 iPhone",
             "choose overlay" => "选择叠加图层",
             "wait for a valid overlay preview" => "等待有效的叠加图层预览",
-            "Apply an overlay once to create a recovery backup." => "应用一次叠加图层以创建恢复备份。",
-            "Overlay worker stopped unexpectedly" => "叠加图层工作线程意外停止",
+            "Apply an overlay once to create a recovery backup." => {
+                "应用一次叠加图层以创建恢复备份。"
+            }
+            "Effects worker stopped unexpectedly. Use Recover interrupted operation if recovery is available." => {
+                "效果工作线程意外停止。如有恢复记录，请使用“恢复中断的操作”。"
+            }
             "Card" => "卡片",
             "Select a card" => "选择卡片",
             "Use an opaque background and a transparent foreground. Images are fitted to the card automatically." => {
@@ -145,16 +275,12 @@ impl Language {
             "Backing up current card metadata and artwork…" => "正在备份当前卡片数据和图片…",
             "Recovering previous card data…" => "正在恢复之前的卡片数据…",
             "Restoring previous skin…" => "正在恢复之前的皮肤…",
-            "Restore previous skin" => "恢复之前的皮肤",
             "Apply backs up current card data automatically." => "应用前会自动备份当前卡片数据。",
             "Select a saved card and connect one iPhone by USB. Use the Wallet tab to scan a new card." => {
                 "选择已保存的卡片并通过 USB 连接一台 iPhone。可在钱包选项卡扫描新卡片。"
             }
             "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." => {
                 "皮肤已应用。强制关闭并重新打开钱包和 Apple Pay 以查看效果。"
-            }
-            "Previous skin restored. Force-close and reopen Wallet and Apple Pay." => {
-                "之前的皮肤已恢复。请强制关闭并重新打开钱包和 Apple Pay。"
             }
             "Background PNG" => "背景 PNG",
             "Foreground PNG" => "前景 PNG",
@@ -186,30 +312,46 @@ impl Language {
             "Language changed." => "语言已切换。",
             "Transport mode" => "连接方式",
             "entries" => "条记录",
-            "Ready. Connect iPhone via USB or paired WiFi and unlock it." => "就绪。请通过 USB 或已配对的 WiFi 连接并解锁 iPhone。",
-            "No iPhone connected via USB or paired WiFi." => "未检测到通过 USB 或已配对 WiFi 连接的 iPhone。",
+            "Ready. Connect iPhone via USB or paired WiFi and unlock it." => {
+                "就绪。请通过 USB 或已配对的 WiFi 连接并解锁 iPhone。"
+            }
+            "No iPhone connected via USB or paired WiFi." => {
+                "未检测到通过 USB 或已配对 WiFi 连接的 iPhone。"
+            }
             "Please select a connected iPhone." => "请选择已连接的 iPhone。",
-            "Disconnect the USB cable and refresh to guarantee the full AirTraffic path uses WiFi." => "请断开 USB 线并刷新，以确保完整的 AirTraffic 路径使用 WiFi。",
+            "Disconnect the USB cable and refresh to guarantee the full AirTraffic path uses WiFi." => {
+                "请断开 USB 线并刷新，以确保完整的 AirTraffic 路径使用 WiFi。"
+            }
             "Please enter or scan a target card hash." => "请输入或扫描目标卡片 Hash。",
             "Please choose a card skin image first." => "请先选择卡片皮肤图片。",
             "Crop position updated." => "裁切位置已更新。",
-            "Scanning syslog... Open Wallet or tap your card on iPhone." => "正在扫描 syslog... 请在 iPhone 上打开钱包并点击卡片。",
+            "Scanning syslog... Open Wallet or tap your card on iPhone." => {
+                "正在扫描 syslog... 请在 iPhone 上打开钱包并点击卡片。"
+            }
             "Syslog scanning stopped." => "syslog 扫描已停止。",
             "Writing card skin to iPhone..." => "正在将卡片皮肤写入 iPhone...",
             "Please select a .passthm theme file first." => "请先选择一个 .passthm 主题文件。",
             "Writing passcode theme buttons..." => "正在将锁屏密码主题按钮写入 iPhone...",
             "Syslog scan finished" => "syslog 扫描完成",
-            "Card skin successfully flashed! Force quit Wallet on iPhone and reopen it." => "卡片皮肤应用成功！请在 iPhone 上强制关闭并重新打开 Wallet。",
-            "Passcode theme applied! Lock your iPhone to view the new keypad." => "锁屏密码主题应用成功！锁定 iPhone 查看新的键盘样式。",
+            "Card skin successfully flashed! Force quit Wallet on iPhone and reopen it." => {
+                "卡片皮肤应用成功！请在 iPhone 上强制关闭并重新打开 Wallet。"
+            }
+            "Passcode theme applied! Lock your iPhone to view the new keypad." => {
+                "锁屏密码主题应用成功！锁定 iPhone 查看新的键盘样式。"
+            }
             "Card skin updated successfully!" => "卡片皮肤更新成功！",
             "Restoring original card face..." => "正在恢复原卡面...",
             "Restoring original card artwork..." => "正在恢复原卡面图片...",
             "Clearing .cache cache..." => "正在清理 .cache 缓存...",
             "Clearing .pkcache cache..." => "正在清理 .pkcache 缓存...",
             "Original card face restored successfully!" => "原卡面恢复成功！",
-            "Original card face restored. Force close Wallet and reopen it." => "原卡面已恢复。请强制关闭并重新打开 Wallet。",
+            "Original card face restored. Force close Wallet and reopen it." => {
+                "原卡面已恢复。请强制关闭并重新打开 Wallet。"
+            }
             "Original card backup not found." => "未找到原卡面备份。",
-            "Apply a card skin once to create an original backup." => "先应用一次卡片皮肤以创建原卡面备份。",
+            "Apply a card skin once to create an original backup." => {
+                "先应用一次卡片皮肤以创建原卡面备份。"
+            }
             "Passcode theme applied successfully!" => "锁屏密码主题应用成功！",
             "Failed to parse theme:" => "解析主题失败：",
             "Card captured" => "已捕获卡片",
@@ -224,7 +366,9 @@ impl Language {
             "connected device(s); transport mode:" => "台已连接设备；连接方式：",
             "Could not enumerate devices:" => "无法枚举设备：",
             "Selected iPhone has no" => "选中的 iPhone 没有",
-            "connection. Refresh devices or change transport mode." => "连接。请刷新设备或更改连接方式。",
+            "connection. Refresh devices or change transport mode." => {
+                "连接。请刷新设备或更改连接方式。"
+            }
             "Scanning syslog..." => "正在扫描 syslog...",
             "Open Wallet on iPhone and tap your card" => "请在 iPhone 上打开钱包并点击目标卡片",
             "Stop" => "停止",
@@ -253,41 +397,65 @@ impl Language {
             "1536 x 969 px pass canvas" => "1536 x 969 像素卡片画布",
             "No artwork loaded" => "尚未加载图片",
             "No image" => "没有图片",
-            "After applying, force close Apple Wallet and reopen it." => "应用后，请强制关闭 Apple Wallet 并重新打开。",
+            "After applying, force close Apple Wallet and reopen it." => {
+                "应用后，请强制关闭 Apple Wallet 并重新打开。"
+            }
             "Passcode Theme" => "锁屏密码主题",
-            "Custom lockscreen keypad from Cowabunga or Nugget" => "来自 Cowabunga 或 Nugget 的自定义锁屏键盘",
+            "Custom lockscreen keypad from Cowabunga or Nugget" => {
+                "来自 Cowabunga 或 Nugget 的自定义锁屏键盘"
+            }
             "Theme Package" => "主题包",
-            "Choose a .passthm archive containing dialer artwork" => "选择包含拨号键盘图片的 .passthm 压缩包",
+            "Choose a .passthm archive containing dialer artwork" => {
+                "选择包含拨号键盘图片的 .passthm 压缩包"
+            }
             "Choose .passthm..." => "选择 .passthm...",
             "assets" => "个资源",
             "Target iOS Cache" => "目标 iOS 缓存",
-            "Select cache format based on connected iOS version" => "根据连接设备的 iOS 版本选择缓存格式",
+            "Select cache format based on connected iOS version" => {
+                "根据连接设备的 iOS 版本选择缓存格式"
+            }
             "Auto (TelephonyUI-10)" => "自动（TelephonyUI-10）",
             "TelephonyUI-10 (iOS 18+)" => "TelephonyUI-10（iOS 18+）",
             "TelephonyUI-9 (iOS 16-17)" => "TelephonyUI-9（iOS 16-17）",
             "TelephonyUI-8 (Legacy)" => "TelephonyUI-8（旧版本）",
             "Keypad Language" => "键盘语言",
-            "Subtext alphabet layout (English, Russian, Ukrainian, Japanese, or Universal)" => "按键副文字母布局（英语、俄语、乌克兰语、日语或通用）",
+            "Subtext alphabet layout (English, Russian, Ukrainian, Japanese, or Universal)" => {
+                "按键副文字母布局（英语、俄语、乌克兰语、日语或通用）"
+            }
             "Russian" => "俄语",
             "Ukrainian" => "乌克兰语",
             "Japanese" => "日语",
             "All Languages (Universal)" => "全部语言（通用）",
             "Bold Text (iOS Accessibility)" => "粗体文字（iOS 辅助功能）",
-            "Generates *-bold.png for devices with Bold Text turned ON in iPhone Settings -> Display" => "为 iPhone 设置 -> 显示与亮度中启用粗体文字的设备生成 *-bold.png",
+            "Generates *-bold.png for devices with Bold Text turned ON in iPhone Settings -> Display" => {
+                "为 iPhone 设置 -> 显示与亮度中启用粗体文字的设备生成 *-bold.png"
+            }
             "Apply Passcode Theme" => "应用锁屏密码主题",
             "Keypad Preview" => "键盘预览",
             "Dialer button artwork" => "拨号按钮图片",
             "No theme loaded" => "尚未加载主题",
             "3x4 Keypad" => "3x4 键盘",
             "No theme" => "没有主题",
-            "After applying, lock your iPhone to see the new keypad." => "应用后，请锁定 iPhone 查看新的键盘样式。",
+            "After applying, lock your iPhone to see the new keypad." => {
+                "应用后，请锁定 iPhone 查看新的键盘样式。"
+            }
             "Setup & Card Hash Guide" => "设置与卡片 Hash 指南",
-            "Everything you need to connect and capture your card" => "连接设备并捕获卡片所需的全部信息",
+            "Everything you need to connect and capture your card" => {
+                "连接设备并捕获卡片所需的全部信息"
+            }
             "Prerequisites" => "使用前准备",
-            "- 64-bit iTunes or Apple Mobile Device Support installed" => "- 已安装 64 位 iTunes 或 Apple Mobile Device Support",
-            "- First-time setup: connect by USB and tap \"Trust this Computer\"" => "- 首次使用：通过 USB 连接并点击“信任此电脑”",
-            "- WiFi: enable WiFi sync, then use the same local network" => "- WiFi：启用 WiFi 同步，并确保双方处于同一局域网",
-            "- Select Auto, USB only, or WiFi only in the top bar" => "- 在顶部栏选择自动、仅 USB 或仅 WiFi",
+            "- 64-bit iTunes or Apple Mobile Device Support installed" => {
+                "- 已安装 64 位 iTunes 或 Apple Mobile Device Support"
+            }
+            "- First-time setup: connect by USB and tap \"Trust this Computer\"" => {
+                "- 首次使用：通过 USB 连接并点击“信任此电脑”"
+            }
+            "- WiFi: enable WiFi sync, then use the same local network" => {
+                "- WiFi：启用 WiFi 同步，并确保双方处于同一局域网"
+            }
+            "- Select Auto, USB only, or WiFi only in the top bar" => {
+                "- 在顶部栏选择自动、仅 USB 或仅 WiFi"
+            }
             "Finding Your Card Hash" => "查找卡片 Hash",
             "1. Click \"Scan\" in the Wallet tab" => "1. 在钱包页点击“扫描”",
             "2. Open Apple Wallet on your iPhone" => "2. 在 iPhone 上打开 Apple Wallet",
@@ -297,15 +465,27 @@ impl Language {
             "Activation & Theme Guide" => "应用与主题指南",
             "Applying skins and dialer keypad packages" => "应用卡片皮肤和拨号键盘主题",
             "Activating Apple Wallet Skin" => "应用 Apple Wallet 皮肤",
-            "1. Click \"Apply Card Skin\" and wait for completion" => "1. 点击“应用卡片皮肤”并等待完成",
-            "2. Open App Switcher on iPhone (swipe up from bottom)" => "2. 在 iPhone 上打开 App 切换器（从底部向上滑动）",
-            "3. Force close Apple Wallet by swiping up on it" => "3. 向上滑动并强制关闭 Apple Wallet",
+            "1. Click \"Apply Card Skin\" and wait for completion" => {
+                "1. 点击“应用卡片皮肤”并等待完成"
+            }
+            "2. Open App Switcher on iPhone (swipe up from bottom)" => {
+                "2. 在 iPhone 上打开 App 切换器（从底部向上滑动）"
+            }
+            "3. Force close Apple Wallet by swiping up on it" => {
+                "3. 向上滑动并强制关闭 Apple Wallet"
+            }
             "4. Reopen Wallet - your new skin appears!" => "4. 重新打开钱包，即可看到新的皮肤！",
             "Passcode Themes (.passthm)" => "锁屏密码主题（.passthm）",
-            "- Compatible with Cowabunga & Nugget theme packages" => "- 兼容 Cowabunga 和 Nugget 主题包",
-            "- iOS 18+: Select \"Auto (TelephonyUI-10)\"" => "- iOS 18+：选择“自动（TelephonyUI-10）”",
+            "- Compatible with Cowabunga & Nugget theme packages" => {
+                "- 兼容 Cowabunga 和 Nugget 主题包"
+            }
+            "- iOS 18+: Select \"Auto (TelephonyUI-10)\"" => {
+                "- iOS 18+：选择“自动（TelephonyUI-10）”"
+            }
             "- iOS 16-17: Select \"TelephonyUI-9\"" => "- iOS 16-17：选择“TelephonyUI-9”",
-            "- Lock screen to verify your updated keypad artwork" => "- 锁定屏幕以查看更新后的键盘图片",
+            "- Lock screen to verify your updated keypad artwork" => {
+                "- 锁定屏幕以查看更新后的键盘图片"
+            }
             _ => source,
         }
     }

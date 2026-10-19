@@ -62,6 +62,38 @@ pub fn backup_exists(udid: &str, card_hash: &str) -> bool {
         .any(|asset| dir.join(asset).is_file())
 }
 
+/// Reset needs every ordinary scale candidate, especially the preferred PDF.
+/// A partial backup must not leave custom artwork taking precedence.
+pub fn complete_backup_exists(udid: &str, card_hash: &str) -> bool {
+    let dir = backup_dir(udid, card_hash);
+    CARD_ARTWORK_ASSETS
+        .iter()
+        .all(|asset| dir.join(asset).is_file())
+}
+
+pub fn load_complete_original_assets(
+    udid: &str,
+    card_hash: &str,
+) -> Result<Vec<(String, Vec<u8>)>> {
+    load_complete_original_directory(&backup_dir(udid, card_hash))
+}
+
+fn load_complete_original_directory(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    use std::io::Read;
+    CARD_ARTWORK_ASSETS.iter().map(|asset| {
+        let path = dir.join(asset);
+        let metadata = fs::symlink_metadata(&path)
+            .context("Complete original artwork backup unavailable; remove effects while keeping current artwork instead")?;
+        anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(), "Original artwork backup is not a regular file");
+        const LIMIT: u64 = 32 * 1024 * 1024;
+        anyhow::ensure!(metadata.len() > 0 && metadata.len() <= LIMIT, "Original artwork backup exceeds size limits");
+        let mut bytes = Vec::new();
+        fs::File::open(&path)?.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 == metadata.len(), "Original artwork backup changed while reading");
+        Ok(((*asset).to_owned(), bytes))
+    }).collect()
+}
+
 fn card_hash_candidates(card_hash: &str) -> Vec<String> {
     let trimmed = card_hash.trim_end_matches('=');
     let mut candidates = vec![card_hash.to_string(), trimmed.to_string()];
@@ -133,7 +165,10 @@ where
 
         let device_path = format!("{pkpass_dir}/{asset}");
         if !afc.exists(&device_path) {
-            log(&format!("Original card asset not present on device: {}", asset));
+            log(&format!(
+                "Original card asset not present on device: {}",
+                asset
+            ));
             continue;
         }
 
@@ -147,16 +182,15 @@ where
     }
 
     if available_assets == 0 {
-        log("Original Wallet card directory exists, but no backup artwork assets are available; continuing without a restore backup.");
+        log(
+            "Original Wallet card directory exists, but no backup artwork assets are available; continuing without a restore backup.",
+        );
     }
 
     Ok(Some(resolved_hash))
 }
 
-pub fn load_original_assets(
-    udid: &str,
-    card_hash: &str,
-) -> Result<Vec<(String, Vec<u8>)>> {
+pub fn load_original_assets(udid: &str, card_hash: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let dir = backup_dir(udid, card_hash);
     let mut assets = Vec::new();
 
@@ -171,7 +205,10 @@ pub fn load_original_assets(
     }
 
     if assets.is_empty() {
-        bail!("Original card face backup not found for card hash {}", card_hash);
+        bail!(
+            "Original card face backup not found for card hash {}",
+            card_hash
+        );
     }
 
     Ok(assets)
@@ -185,4 +222,40 @@ fn write_backup_file(path: &Path, data: &[u8]) -> Result<()> {
     }
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_requires_complete_nonempty_backup_and_preserves_exact_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "aircard-reset-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        assert!(load_complete_original_directory(&dir).is_err());
+        for (index, leaf) in CARD_ARTWORK_ASSETS.iter().enumerate() {
+            fs::write(dir.join(leaf), format!("original-{index}")).unwrap();
+            if index < 2 {
+                assert!(load_complete_original_directory(&dir).is_err());
+            }
+        }
+        let assets = load_complete_original_directory(&dir).unwrap();
+        for (index, (leaf, bytes)) in assets.iter().enumerate() {
+            assert_eq!(leaf, CARD_ARTWORK_ASSETS[index]);
+            assert_eq!(bytes, format!("original-{index}").as_bytes());
+        }
+        fs::write(dir.join(CARD_ARTWORK_ASSETS[2]), b"").unwrap();
+        assert!(load_complete_original_directory(&dir).is_err());
+        for leaf in CARD_ARTWORK_ASSETS {
+            fs::remove_file(dir.join(leaf)).unwrap();
+        }
+        fs::remove_dir(&dir).unwrap();
+    }
 }

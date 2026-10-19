@@ -1,5 +1,3 @@
-//! Build metadata candidates while retaining exact original bytes
-
 use std::collections::HashSet;
 use std::fmt;
 
@@ -7,7 +5,7 @@ use anyhow::{Result, ensure};
 use serde::de::{Deserialize, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
-use super::artwork::{DynamicConfiguration, sha256};
+use super::artwork::sha256;
 
 pub const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
@@ -112,230 +110,48 @@ pub fn parse_unique(bytes: &[u8]) -> Result<Value> {
     Ok(value)
 }
 
-pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<u8>, Vec<u8>)> {
-    config.validate()?;
+/// Managed-only replacement. The caller must reconcile the complete fresh
+/// snapshot against owned history before supplying its exact metadata checksum.
+pub(super) fn replace_managed(
+    original: &[u8],
+    expected_sha256: &str,
+    desired: super::configuration::Selection,
+) -> Result<Vec<u8>> {
+    ensure!(
+        sha256(original) == expected_sha256,
+        "Managed metadata preimage changed"
+    );
     let mut value = parse_unique(original)?;
     let object = value
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("Original pass JSON must be an object"))?;
-    ensure!(
-        !object.is_empty(),
-        "Supply the complete captured pass JSON, not an empty object"
-    );
-    let dynamic = serde_json::to_value(config)?;
-    if let Some(existing) = object.get("dynamicLayerConfiguration") {
-        // Only add typed effect members to an exact supported subset. Preserve
-        // every existing value; unknown members, removals and preset changes fail.
-        if existing != &dynamic
-            && existing.get("version") == Some(&serde_json::json!(2))
-            && existing.get("parallaxEnabled") == Some(&serde_json::json!(true))
-            && existing.as_object().is_some_and(|members| {
-                members
-                    .iter()
-                    .all(|(key, value)| dynamic.get(key) == Some(value))
-            })
-        {
-            let mut changes = Vec::new();
-            for key in ["crossDissolve", "transactionEffect", "neutralEmitter"] {
-                if existing.get(key).is_none()
-                    && let Some(value) = dynamic.get(key)
-                {
-                    changes.push(serde_json::json!({"operation":"add", "path":format!("/dynamicLayerConfiguration/{key}"), "value":value}));
-                }
-            }
-            object.insert("dynamicLayerConfiguration".into(), dynamic.clone());
-            let diff = serde_json::json!({
-                "original_sha256": sha256(original),
-                "changes": changes
-            });
-            return Ok((
-                serde_json::to_vec_pretty(&value)?,
-                serde_json::to_vec_pretty(&diff)?,
-            ));
-        }
-        ensure!(
-            existing == &dynamic,
-            "This card has a different effects configuration; it cannot be replaced automatically"
-        );
-        // Preserve existing matching metadata byte-for-byte
-        let diff = serde_json::json!({
-            "original_sha256": sha256(original), "changes": []
-        });
-        return Ok((original.to_vec(), serde_json::to_vec_pretty(&diff)?));
+        .filter(|object| !object.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Complete captured pass JSON is required"))?;
+    let dynamic = desired
+        .native_configuration()
+        .map(serde_json::to_value)
+        .transpose()?;
+    if object.get("dynamicLayerConfiguration") == dynamic.as_ref() {
+        return Ok(original.to_vec());
     }
-    object.insert("dynamicLayerConfiguration".into(), dynamic.clone());
-    let diff = serde_json::json!({
-        "original_sha256": sha256(original),
-        "changes": [{"operation": "add", "path": "/dynamicLayerConfiguration", "value": dynamic}]
-    });
-    Ok((
-        serde_json::to_vec_pretty(&value)?,
-        serde_json::to_vec_pretty(&diff)?,
-    ))
+    match dynamic {
+        Some(dynamic) => {
+            object.insert("dynamicLayerConfiguration".into(), dynamic);
+        }
+        None => {
+            object.remove("dynamicLayerConfiguration");
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&value)?;
+    ensure!(
+        bytes.len() <= MAX_JSON_BYTES,
+        "Managed metadata exceeds 4 MiB"
+    );
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::artwork::{
-        EmitterConfiguration, EmitterDensity, EmitterPhysics, EmitterStyle,
-    };
     use super::*;
-
-    #[test]
-    fn particles_add_without_removing_cross_dissolve_or_transaction_members() {
-        for cross in [false, true] {
-            for transaction in [false, true] {
-                let config = DynamicConfiguration {
-                    version: 2,
-                    parallax_enabled: true,
-                    cross_dissolve: cross.then(Default::default),
-                    transaction_effect: transaction.then(Default::default),
-                    neutral_emitter: Some(EmitterConfiguration {
-                        style: EmitterStyle::Twinkling,
-                        density: EmitterDensity::Low,
-                        physics_effect: EmitterPhysics::Off,
-                    }),
-                };
-                let mut base = serde_json::to_value(&config).unwrap();
-                base.as_object_mut().unwrap().remove("neutralEmitter");
-                let original = serde_json::json!({"serialNumber":"preserved", "opaque":[null,1,"a"], "dynamicLayerConfiguration":base});
-                let (bytes, diff) =
-                    candidate(&serde_json::to_vec(&original).unwrap(), &config).unwrap();
-                let mut expected = original.clone();
-                expected["dynamicLayerConfiguration"]["neutralEmitter"] =
-                    serde_json::to_value(&config).unwrap()["neutralEmitter"].clone();
-                assert_eq!(parse_unique(&bytes).unwrap(), expected);
-                assert_eq!(
-                    parse_unique(&diff).unwrap()["changes"]
-                        .as_array()
-                        .unwrap()
-                        .len(),
-                    1
-                );
-                assert_eq!(
-                    parse_unique(&diff).unwrap()["changes"][0]["path"],
-                    "/dynamicLayerConfiguration/neutralEmitter"
-                );
-                assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
-                let mut disabled = config.clone();
-                disabled.neutral_emitter = None;
-                assert!(candidate(&bytes, &disabled).is_err());
-                let mut unknown = original.clone();
-                unknown["dynamicLayerConfiguration"]["unknown"] = true.into();
-                assert!(candidate(&serde_json::to_vec(&unknown).unwrap(), &config).is_err());
-                let mut changed = expected.clone();
-                changed["dynamicLayerConfiguration"]["neutralEmitter"]["style"] = "falling".into();
-                assert!(candidate(&serde_json::to_vec(&changed).unwrap(), &config).is_err());
-                if cross {
-                    let mut disabled = config.clone();
-                    disabled.cross_dissolve = None;
-                    assert!(candidate(&bytes, &disabled).is_err());
-                }
-                if transaction {
-                    let mut disabled = config.clone();
-                    disabled.transaction_effect = None;
-                    assert!(candidate(&bytes, &disabled).is_err());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn transaction_adds_only_to_exact_supported_layers_and_preserves_repeats() {
-        for cross in [false, true] {
-            let config = DynamicConfiguration {
-                version: 2,
-                parallax_enabled: true,
-                neutral_emitter: None,
-                cross_dissolve: cross.then(Default::default),
-                transaction_effect: Some(Default::default()),
-            };
-            let mut base = serde_json::to_value(&config).unwrap();
-            base.as_object_mut().unwrap().remove("transactionEffect");
-            let original = serde_json::to_vec(&serde_json::json!({"serialNumber":"retained", "opaque":[null,123], "dynamicLayerConfiguration":base})).unwrap();
-            let (bytes, diff) = candidate(&original, &config).unwrap();
-            assert_eq!(
-                parse_unique(&diff).unwrap()["changes"][0]["path"],
-                "/dynamicLayerConfiguration/transactionEffect"
-            );
-            assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
-            let mut disabled = config.clone();
-            disabled.transaction_effect = None;
-            assert!(candidate(&bytes, &disabled).is_err());
-            let mut unknown = parse_unique(&original).unwrap();
-            unknown["dynamicLayerConfiguration"]["unknown"] = true.into();
-            assert!(candidate(&serde_json::to_vec(&unknown).unwrap(), &config).is_err());
-            let mut wrong = parse_unique(&bytes).unwrap();
-            wrong["dynamicLayerConfiguration"]["transactionEffect"]["style"] = "other".into();
-            assert!(candidate(&serde_json::to_vec(&wrong).unwrap(), &config).is_err());
-        }
-    }
-
-    #[test]
-    fn cross_dissolve_upgrades_only_exact_parallax_and_preserves_repeat_bytes() {
-        let mut config = DynamicConfiguration {
-            version: 2,
-            parallax_enabled: true,
-            neutral_emitter: None,
-            cross_dissolve: Some(Default::default()),
-            transaction_effect: None,
-        };
-        let original = br#" {"serialNumber":"captured","large":1844674407370955161601,"dynamicLayerConfiguration":{"parallaxEnabled":true,"version":2}} "#;
-        let (bytes, diff) = candidate(original, &config).unwrap();
-        let value = parse_unique(&bytes).unwrap();
-        assert_eq!(
-            value["dynamicLayerConfiguration"]["crossDissolve"],
-            serde_json::json!({"intensity":"default"})
-        );
-        assert_eq!(value["large"].to_string(), "1844674407370955161601");
-        assert_eq!(
-            parse_unique(&diff).unwrap()["changes"][0]["path"],
-            "/dynamicLayerConfiguration/crossDissolve"
-        );
-        assert_eq!(candidate(&bytes, &config).unwrap().0, bytes);
-        for existing in [
-            serde_json::json!({"version":2,"parallaxEnabled":true,"extra":true}),
-            serde_json::json!({"version":2,"parallaxEnabled":false}),
-            serde_json::json!({"version":2,"parallaxEnabled":true,"neutralEmitter":{"style":"twinkling","density":"low","physicsEffect":"off"}}),
-            serde_json::json!({"version":2,"parallaxEnabled":true,"crossDissolve":{"intensity":"high"}}),
-        ] {
-            let input = serde_json::to_vec(
-                &serde_json::json!({"serialNumber":"test","dynamicLayerConfiguration":existing}),
-            )
-            .unwrap();
-            assert!(candidate(&input, &config).is_err());
-        }
-        config.cross_dissolve = None;
-        assert!(
-            candidate(&bytes, &config).is_err(),
-            "Disabling must not silently replace installed effects; restore first"
-        );
-    }
-
-    #[test]
-    fn changing_artwork_preserves_existing_parallax_metadata_exactly() {
-        let original = b" {\"serialNumber\":\"test\", \"dynamicLayerConfiguration\":{\"parallaxEnabled\":true,\"version\":2},\"opaque\":1844674407370955161601}\n";
-        let config = DynamicConfiguration {
-            version: 2,
-            parallax_enabled: true,
-            neutral_emitter: None,
-            cross_dissolve: None,
-            transaction_effect: None,
-        };
-        let (bytes, diff) = candidate(original, &config).unwrap();
-        assert_eq!(bytes, original);
-        assert_eq!(
-            parse_unique(&diff).unwrap()["changes"],
-            serde_json::json!([])
-        );
-        for other in [
-            br#"{"dynamicLayerConfiguration":{"version":2,"parallaxEnabled":false}}"#.as_slice(),
-            br#"{"dynamicLayerConfiguration":{"version":2,"parallaxEnabled":true,"extra":true}}"#
-                .as_slice(),
-        ] {
-            assert!(candidate(other, &config).is_err());
-        }
-    }
 
     #[test]
     fn rejects_ambiguous_or_unbounded_json() {
@@ -356,40 +172,32 @@ mod tests {
     #[test]
     fn patches_only_dynamic_member_and_binds_exact_original() {
         let original = b" {\"serialNumber\":\"captured\",\"opaque\":[null,true,{\"n\":42}]}\n";
-        let config = DynamicConfiguration {
-            version: 2,
-            parallax_enabled: true,
-            neutral_emitter: None,
-            cross_dissolve: None,
-            transaction_effect: None,
+        let selected = super::super::configuration::Selection {
+            parallax: true,
+            ..Default::default()
         };
-        let (bytes, diff) = candidate(original, &config).unwrap();
+        let bytes = replace_managed(original, &sha256(original), selected).unwrap();
         let mut patched = parse_unique(&bytes).unwrap();
         patched
             .as_object_mut()
             .unwrap()
             .remove("dynamicLayerConfiguration");
         assert_eq!(patched, parse_unique(original).unwrap());
-        assert_eq!(
-            parse_unique(&diff).unwrap()["original_sha256"],
-            sha256(original)
-        );
-        for input in ["[]", "null", "{}", r#"{"dynamicLayerConfiguration":null}"#] {
-            assert!(candidate(input.as_bytes(), &config).is_err());
+        for input in ["[]", "null", "{}"] {
+            assert!(
+                replace_managed(input.as_bytes(), &sha256(input.as_bytes()), selected).is_err()
+            );
         }
     }
 
     #[test]
     fn preserves_large_precise_numbers_and_private_marker_objects() {
         let original = br#"{"large":1844674407370955161601,"decimal":1.234567890123456789,"marker":{"$serde_json::private::Number":"123"}}"#;
-        let config = DynamicConfiguration {
-            version: 2,
-            parallax_enabled: true,
-            neutral_emitter: None,
-            cross_dissolve: None,
-            transaction_effect: None,
+        let selected = super::super::configuration::Selection {
+            parallax: true,
+            ..Default::default()
         };
-        let (bytes, _) = candidate(original, &config).unwrap();
+        let bytes = replace_managed(original, &sha256(original), selected).unwrap();
         let before = parse_unique(original).unwrap();
         let mut after = parse_unique(&bytes).unwrap();
         after

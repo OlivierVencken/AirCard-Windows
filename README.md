@@ -89,19 +89,19 @@ If both transports are available, **Auto** uses USB first and falls back to WiFi
 
 ---
 
-## How to Apply a Parallax Card Overlay
-1. Connect one iPhone by USB. Disconnect WiFi sync for this session if the phone also appears over WiFi; overlays require a USB-only connection.
-2. In **Wallet**, select or scan the card and use **Choose Image...** to select the background artwork.
-3. Enable **Overlay**, then use **Choose Overlay...** to select a transparent PNG foreground.
-4. Drag inside **Wallet Preview** to adjust the crop. The preview is static; the applied card uses native parallax motion. Apply stays disabled until the overlay is valid.
-5. Click **Apply Card Skin** and wait for backup, installation and verification to finish.
-6. Force-close and reopen Wallet and Apple Pay to see the result.
+## How to Apply Wallet Effects
+1. Connect one iPhone by USB only. Effects reject WiFi-only and mixed-transport sessions.
+2. In **Wallet**, select or scan the card, choose its artwork and adjust the crop.
+3. Open **Effects**. It automatically uses Wallet's artwork and crop.
+4. Enable **Parallax** and use **Choose Overlay...** to select a transparent PNG foreground.
+5. Move the mouse over **Preview** to tilt the layers. The short hint below the card explains the gesture.
+6. Click **Apply effects** and wait for backup, installation and verification. Reopen Wallet and Apple Pay to check the result on the phone.
 
 Use artwork with background margins and keep the overlay subject away from the crop edges to allow for tilt. PNG files with an opaque checkerboard background do not provide transparency.
 
-**Cross-dissolve:** With Overlay enabled, select **Cross-dissolve** and **Choose Alternate Background...**. Choose an opaque PNG, JPG or WebP. **Base artwork** and **Alternate artwork** inspect the two compositions; the desktop preview does not simulate the native tilt reveal. The static fallback uses the base artwork. Installation requires recoverable originals for every additional PNG and will refuse missing originals. The alternate background shows at rest; tilting reveals the base artwork while parallax continues.
+**Cross-dissolve:** Enable **Cross-dissolve** and choose an opaque alternate PNG, JPG or WebP with **Choose Alternate Background...**. The preview shows the alternate at rest; mouse tilt reveals the base through a radial mask while parallax continues. Installation requires recoverable originals for every additional PNG. The static fallback uses the base composition.
 
-**Transaction effect (experimental):** With Overlay enabled, select **Transaction effect (experimental)**, then **Particle PNG...** for a visible transparent PNG sprite and **Shape SVG...** for a single-path SVG. This can be combined with cross-dissolve. The small previews inspect the inputs; native playback during payment results has not yet been validated on a phone. The ordinary card preview and static fallback stay unchanged.
+**Transaction effect:** Enable **Transaction effect**, then choose a visible transparent sprite with **Particle PNG...** and a single-path SVG with **Shape SVG...**. **Play transaction** below the preview runs the expanding particle outline locally. It can combine with the other effects.
 
 The SVG must have positive pixel `width` and `height`, and one direct `<path>` child with only a `d` attribute. An optional `viewBox` must match `0 0 width height`. Flatten groups and transforms before importing; scripts, linked resources, entities and additional elements are rejected. A minimal shape is:
 
@@ -115,9 +115,9 @@ Normal transaction installation requires recoverable originals for the SVG and a
 
 **Explicit transaction trial:** Close AirCard, then run [`try-transaction-experimental.cmd`](try-transaction-experimental.cmd) to launch with the transaction-only missing-originals exception. It permits unknown originals for the three transaction emitter PNGs and shape SVG, and shows an incomplete-recovery warning. Metadata, base artwork and cross-dissolve originals remain mandatory. Restore reapplies known originals but may leave those four transaction files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply anything automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
 
-To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; there is no animation-test button. One GUI trial completed installation and candidate readbacks, but visible transaction animation remains unvalidated.
+To observe the effect, reopen Wallet and Apple Pay after Apply and watch the card during a normal payment-result presentation. The inspected native preset emits particles along the SVG outline, expands them and fades over roughly 3.2 seconds. Both success and failure callbacks can reach this renderer path. Opening the card, tilting or authenticating alone is not an established trigger; the preview button runs locally and cannot trigger the phone's payment renderer. The operator confirmed transaction playback after a completed Apple Pay payment on 18 October 2026. Failure-result playback and restart persistence remain unverified.
 
-**Particles (experimental):** With Overlay enabled, select a transparent PNG with **Choose Particle PNG...**. The native preset uses twinkling, low density and physics off. It can combine with cross-dissolve and transaction effects; the preview stays static. Normal launches require recoverable originals for every overwritten resource.
+**Particles:** Enable **Particles** and select a transparent PNG with **Choose Particle PNG...**. The preview animates the selected sprite using twinkling, low density and physics off. It can combine with cross-dissolve and transaction effects. Normal launches require recoverable originals for every overwritten resource.
 
 **Explicit particle trial:** After building the release executable, close AirCard and run [`try-particles-experimental.cmd`](try-particles-experimental.cmd). It permits unknown originals only for `neutralEmitter.png`, `neutralEmitter@2x.png` and `neutralEmitter@3x.png`. Metadata, base, alternate and transaction originals remain required. Restore may leave those three files behind, reports incomplete recovery and keeps its recovery selection. The launcher uses `target/release/aircard.exe` and does not apply automatically; launching the executable directly keeps installation strict. Retain this executable and its recovery directory after a trial.
 
