@@ -1,3 +1,8 @@
+This is an extended fork of [AirCard Windows](https://github.com/Lumid-Off/AirCard-Windows), adding native Apple Wallet effects.
+
+The README below is a copy from that repo.
+
+
 # AirCard (Windows) 🎴
 
 > **Apple Wallet Card Skinner & Lockscreen Passcode Themer for iOS 18+ (No Jailbreak Required)**  
@@ -129,7 +134,7 @@ Prerequisites: [Rust toolchain](https://rustup.rs/) (`stable-x86_64-pc-windows-m
 
 ```powershell
 # Clone the repository
-git clone https://github.com/OlivierVencken/AirCard-Windows.git
+git clone https://github.com/Lumid-Off/AirCard-Windows.git
 cd AirCard-Windows
 
 # Run tests
@@ -146,7 +151,6 @@ The compiled binary will be in `target\release\aircard.exe`.
 ## Contributors
 - **[@Lumid-Off](https://github.com/Lumid-Off)** (Windows Native Rust Port & Maintainer) — [GitHub](https://github.com/Lumid-Off) · [Twitter / X](https://x.com/LumidOff)
 - **[@mak5er](https://github.com/mak5er)** (Original macOS App & Exploit Research) — [GitHub](https://github.com/mak5er) · [Twitter / X](https://x.com/mak5er)
-- **[@OlivierVencken](https://github.com/OlivierVencken)** (Native Wallet Effects Developer) — [GitHub](https://github.com/OlivierVencken)
 - **[AirLift](https://github.com/0xjohnnydev/airlift)** by **[0xjohnny (@0xjohnnydev)](https://github.com/0xjohnnydev)**: Original AirTraffic/ATAirlock sandbox escape and proof of concept underlying `AirliftFFI`.
 
 ## Credits
