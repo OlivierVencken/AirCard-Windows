@@ -1449,7 +1449,7 @@ impl AirCardApp {
 
                 if m3_button_tonal(ui, language.text("Open Effects")) { self.current_tab = AppTab::Effects; }
                 if self.wallet_effects_blocked() {
-                    ui.label(language.text("This card has effects history. Use Effects recovery; ordinary writes need effects removal support."));
+                    ui.label(language.text("This card has managed effects or pending recovery. In Effects, use Remove all effects or recover the interrupted operation before ordinary artwork changes."));
                 }
                 ui.add_space(12.0);
 
@@ -2000,7 +2000,7 @@ mod tests {
                 if self.frames > 8 && loaded && !self.app.overlay_editor.busy() && !self.requested {
                     if matches!(state, 5 | 6) { self.app.overlay_editor.qa_state(state, &self.directory); }
                     if state == 0 { assert_eq!(self.app.can_apply_effects(), self.expect_overlay_valid); }
-                    if matches!(state, 2 | 3 | 4 | 6 | 7) { assert!(!self.app.can_apply_effects()); }
+                    if matches!(state, 2 | 3 | 4 | 6) { assert!(!self.app.can_apply_effects()); }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
                     self.requested = true;
                 }

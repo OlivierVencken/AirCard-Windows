@@ -19,6 +19,22 @@ use crate::afc::AfcClient;
 use crate::airlift;
 use crate::device::{ActiveDeviceSession, ConnectionMode, DeviceTransport};
 
+mod managed_device;
+pub(crate) use managed_device::{
+    ManagedOutcome, managed_apply, managed_reset, managed_restore, managed_status,
+};
+
+#[cfg(test)]
+pub(super) fn qa_completed_recovery(directory: &Path, binding: &Binding) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    let mut journal = tests::recovery_capture_fixture();
+    journal.binding = binding.clone();
+    journal.kind = JournalKind::MetadataParallax;
+    journal.trial_pack_sha256 = Some(sha256(b"illustrative QA pack"));
+    journal.status = "ParallaxCandidateReadbackMatchedAwaitingManualObservation".into();
+    save(directory, &journal)
+}
+
 pub(crate) fn experimental_cross_dissolve_enabled() -> bool {
     std::env::var("AIRCARD_EXPERIMENTAL_CROSS_DISSOLVE_NO_ALTERNATE_BACKUP").as_deref() == Ok("1")
 }
@@ -806,6 +822,7 @@ fn write_candidates(
     media::finish_with_cleanup(transfer, cleanup(dir, journal, afc))
 }
 
+#[cfg(test)]
 fn verify_candidates(
     dir: &Path,
     journal: &mut Journal,
@@ -820,7 +837,9 @@ fn verify_candidates(
         .copied()
         .filter(|index| *index != 3)
         .collect();
-    write_candidates(dir, journal, afc, session, &artwork)?;
+    if !artwork.is_empty() {
+        write_candidates(dir, journal, afc, session, &artwork)?;
+    }
     media::cleanup_staging(afc, &journal.held)?;
     cleanup(dir, journal, afc)?;
     invalidate_caches(dir, journal, afc, session)?;
@@ -927,6 +946,7 @@ pub(super) fn no_installation_to_recover(directory: &Path) -> bool {
             .is_ok_and(|journal| !journal.kind.is_installation() && installation_ready(&journal))
 }
 
+#[cfg(test)]
 fn plan_overlay_installation(
     journal: &Journal,
     deployment: &artwork::PreparedDeployment,
@@ -986,6 +1006,7 @@ fn plan_overlay_installation(
     Ok(planned)
 }
 
+#[cfg(test)]
 fn record_trial_policy(
     dir: &Path,
     journal: &mut Journal,
@@ -1016,6 +1037,7 @@ fn record_trial_policy(
     Ok(())
 }
 
+#[cfg(test)]
 fn install_overlay(dir: &Path, pack: &Path, needs_recovery: &mut bool) -> Result<()> {
     let mut journal = load(dir)?;
     ensure!(
@@ -1094,6 +1116,8 @@ pub(crate) fn new_application_directory() -> Result<PathBuf> {
 
 /// Hold the device lock through capture, install, verification and cleanup
 /// Persist recovery before every device mutation
+#[cfg(test)]
+#[allow(dead_code)] // Retain the old pack-based path for historical trial checks.
 pub(crate) fn apply(
     binding: Binding,
     mut config: artwork::PrepareConfig,
@@ -1165,6 +1189,7 @@ pub(crate) fn apply(
     operation.map(|()| false)
 }
 
+#[cfg(test)]
 fn finish_apply_result(
     operation: Result<()>,
     needs_recovery: bool,
@@ -2101,7 +2126,7 @@ mod tests {
         assert_eq!(recoveries.get(), 2);
     }
 
-    fn recovery_capture_fixture() -> Journal {
+    pub(super) fn recovery_capture_fixture() -> Journal {
         serde_json::from_value(serde_json::json!({
             "schema_version":1, "kind":"MetadataCapture", "combined_sync":true,
             "invalidate_caches":true,

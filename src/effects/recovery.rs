@@ -156,6 +156,9 @@ pub(super) enum JournalKind {
     MetadataCrossDissolveTransactionParticleCapture,
     MetadataCrossDissolveTransactionParticles,
     FrontFaceCache,
+    // Version-2 logical transitions use a separate immutable manifest/index.
+    // This fixed inventory is new; no historical slot order is changed.
+    ManagedTransition,
 }
 
 impl JournalKind {
@@ -181,6 +184,7 @@ impl JournalKind {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn with_particles(self, enabled: bool) -> Self {
         if !enabled {
             return self;
@@ -211,6 +215,7 @@ impl JournalKind {
         matches!(
             self.without_particles(),
             Self::MetadataParallax
+                | Self::ManagedTransition
                 | Self::MetadataCrossDissolve
                 | Self::MetadataTransaction
                 | Self::MetadataCrossDissolveTransaction
@@ -234,6 +239,7 @@ impl JournalKind {
                 | Self::MetadataCrossDissolveTransaction
         )
     }
+    #[cfg(test)]
     pub(super) fn for_effects(cross: bool, transaction: bool, installed: bool) -> Self {
         match (cross, transaction, installed) {
             (false, false, false) => Self::MetadataCapture,
@@ -247,7 +253,8 @@ impl JournalKind {
         }
     }
     pub(super) fn has_metadata(self) -> bool {
-        self.transaction()
+        self == Self::ManagedTransition
+            || self.transaction()
             || matches!(
                 self.without_particles(),
                 Self::MetadataCapture
@@ -260,6 +267,9 @@ impl JournalKind {
 
 pub(super) fn inventory(kind: &JournalKind) -> Vec<String> {
     match kind {
+        JournalKind::ManagedTransition => {
+            inventory(&JournalKind::MetadataCrossDissolveTransactionParticles)
+        }
         JournalKind::MetadataParticleCapture
         | JournalKind::MetadataParticles
         | JournalKind::MetadataCrossDissolveParticleCapture
@@ -376,13 +386,13 @@ pub(super) struct Journal {
 impl Journal {
     pub(super) fn allows_missing_original(&self, asset: &Asset) -> bool {
         (self.allow_missing_particle_originals
-            && self.kind.particles()
+            && (self.kind.particles() || self.kind == JournalKind::ManagedTransition)
             && matches!(
                 asset.leaf.as_str(),
                 "neutralEmitter.png" | "neutralEmitter@2x.png" | "neutralEmitter@3x.png"
             ))
             || (self.allow_missing_transaction_originals
-                && self.kind.transaction()
+                && (self.kind.transaction() || self.kind == JournalKind::ManagedTransition)
                 && matches!(
                     asset.leaf.as_str(),
                     "transactionEffectEmitter.png"
@@ -393,7 +403,9 @@ impl Journal {
             || (self.allow_missing_cross_dissolve_originals
                 && matches!(
                     self.kind,
-                    JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
+                    JournalKind::MetadataCrossDissolveCapture
+                        | JournalKind::MetadataCrossDissolve
+                        | JournalKind::ManagedTransition
                 )
                 && matches!(
                     asset.leaf.as_str(),
@@ -405,10 +417,12 @@ impl Journal {
 
     pub(super) fn incomplete_recovery(&self) -> bool {
         self.kind.is_installation()
-            && self
-                .assets
-                .iter()
-                .any(|asset| asset.original_sha256.is_none() && self.allows_missing_original(asset))
+            && self.assets.iter().any(|asset| {
+                asset.original_sha256.is_none()
+                    && self.allows_missing_original(asset)
+                    && (self.kind != JournalKind::ManagedTransition
+                        || asset.candidate_sha256 != sha256(b""))
+            })
     }
 }
 
@@ -441,18 +455,24 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
     );
     let journal: Journal = serde_json::from_slice(bytes)?;
     ensure!(
-        !journal.allow_missing_particle_originals || journal.kind.particles(),
+        !journal.allow_missing_particle_originals
+            || journal.kind.particles()
+            || journal.kind == JournalKind::ManagedTransition,
         "Particle backup exception is invalid for this recovery kind"
     );
     ensure!(
-        !journal.allow_missing_transaction_originals || journal.kind.transaction(),
+        !journal.allow_missing_transaction_originals
+            || journal.kind.transaction()
+            || journal.kind == JournalKind::ManagedTransition,
         "Transaction backup exception is invalid for this recovery kind"
     );
     ensure!(
         !journal.allow_missing_cross_dissolve_originals
             || matches!(
                 journal.kind,
-                JournalKind::MetadataCrossDissolveCapture | JournalKind::MetadataCrossDissolve
+                JournalKind::MetadataCrossDissolveCapture
+                    | JournalKind::MetadataCrossDissolve
+                    | JournalKind::ManagedTransition
             ),
         "Cross-dissolve backup exception is invalid for this recovery kind"
     );
@@ -507,7 +527,25 @@ pub(super) fn load(dir: &Path) -> Result<Journal> {
                 .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
         "Parallax installation requires a bound pack checksum"
     );
-    if journal.kind.is_installation() {
+    if journal.kind == JournalKind::ManagedTransition {
+        ensure!(
+            u8::from(journal.allow_missing_particle_originals)
+                + u8::from(journal.allow_missing_transaction_originals)
+                + u8::from(journal.allow_missing_cross_dissolve_originals)
+                <= 1,
+            "Managed transitions cannot combine trial policies"
+        );
+        ensure!(
+            journal.assets[3].original_sha256.is_some()
+                && journal
+                    .assets
+                    .iter()
+                    .filter(|asset| asset.candidate_sha256 != sha256(b""))
+                    .all(|asset| asset.original_sha256.is_some()
+                        || journal.allows_missing_original(asset)),
+            "Managed recovery requires preimages for every overwritten resource"
+        );
+    } else if journal.kind.is_installation() {
         ensure!(
             journal
                 .assets

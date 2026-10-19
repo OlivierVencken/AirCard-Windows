@@ -181,8 +181,8 @@ impl Draft {
 
 enum Completed {
     Preview(Box<EditorPreview>),
-    Applied(bool),
     Restored(bool),
+    Managed(device::ManagedOutcome, &'static str),
 }
 enum Message {
     Progress(String),
@@ -197,6 +197,8 @@ pub(crate) struct OverlayEditor {
     storage_error: Option<String>,
     persist: bool,
     storage_path: PathBuf,
+    history_status: Option<device::ManagedOutcome>,
+    history_error: Option<String>,
     preview_texture: Option<egui::TextureHandle>,
     alternate_texture: Option<egui::TextureHandle>,
     transaction_texture: Option<egui::TextureHandle>,
@@ -256,6 +258,8 @@ impl Default for OverlayEditor {
             storage_error,
             persist: true,
             storage_path: library_path(),
+            history_status: None,
+            history_error: None,
             preview_texture: None,
             alternate_texture: None,
             transaction_texture: None,
@@ -377,6 +381,36 @@ impl OverlayEditor {
         self.show_alternate = false;
         self.error = self.draft.last_error.clone();
         self.status = self.draft.last_status.clone();
+        self.refresh_history();
+    }
+
+    fn refresh_history(&mut self) {
+        self.history_status = None;
+        self.history_error = None;
+        if !self.persist {
+            return;
+        }
+        if let Some(binding) = &self.target {
+            match device::managed_status(binding) {
+                Ok(Some(status)) => self.install_history_status(status),
+                Ok(None) => {}
+                Err(error) => {
+                    self.history_error =
+                        Some(format!("Could not validate managed history: {error:#}"))
+                }
+            }
+        }
+    }
+
+    fn install_history_status(&mut self, status: device::ManagedOutcome) {
+        self.draft.recovery = status.recovery.as_ref().map(|directory| Recovery {
+            binding: self.target.clone().unwrap(),
+            directory: directory.clone(),
+        });
+        self.draft.prior_recovery = None;
+        self.draft.last_applied = status.selection;
+        self.draft.managed_history = status.effects_active || status.pending;
+        self.history_status = Some(status);
     }
 
     pub fn matches_target(&self, binding: &Binding) -> bool {
@@ -384,6 +418,17 @@ impl OverlayEditor {
     }
 
     pub fn blocks_wallet(&self, udid: &str, card_id: &str) -> bool {
+        if self.history_error.is_some() {
+            return true;
+        }
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|binding| binding.udid == udid && binding.card_id == card_id)
+            && let Some(status) = &self.history_status
+        {
+            return status.pending || status.effects_active;
+        }
         if self.storage_error.is_some() {
             return true;
         }
@@ -409,8 +454,10 @@ impl OverlayEditor {
     }
 
     pub fn apply_issue(&self) -> Option<&str> {
-        if let Some(error) = &self.storage_error {
-            return Some(error);
+        if self.history_error.is_some() || self.storage_error.is_some() {
+            return Some(
+                "Saved effects data could not be validated. Copy error details before proceeding.",
+            );
         }
         if self.target.is_none() {
             return Some("Select a card and device in Wallet first.");
@@ -426,23 +473,16 @@ impl OverlayEditor {
             return Some("Another card on this device needs recovery. Select that card in Wallet.");
         }
         let desired = self.draft.desired_effects().selection;
-        if self.draft.last_applied.is_some_and(|applied| {
-            (applied.parallax && !desired.parallax)
-                || (applied.cross_dissolve && !desired.cross_dissolve)
-                || (applied.particles && !desired.particles)
-                || (applied.transaction && !desired.transaction)
-        }) {
-            return Some("Removing effects needs transition support. Undo remains available.");
+        if !desired.is_empty() && !desired.parallax {
+            return Some("Standalone native effects still need phone validation");
         }
-        if !self.draft.desired_effects().selection.parallax {
-            return Some(
-                "Standalone effects and turning effects off need transition support before applying.",
-            );
+        if desired.is_empty() && self.draft.background.is_none() {
+            return None;
         }
         if self.draft.background.is_none() {
             return Some("Choose a background image");
         }
-        if self.draft.foreground.is_none() {
+        if desired.parallax && self.draft.foreground.is_none() {
             return Some("Choose a transparent overlay PNG");
         }
         if self.draft.cross_dissolve && self.draft.alternate_background.is_none() {
@@ -466,11 +506,35 @@ impl OverlayEditor {
         self.draft.desired_effects().selection.is_empty()
     }
 
+    pub fn uses_captured_static(&self) -> bool {
+        self.all_effects_off() && self.draft.background.is_none()
+    }
+
     pub fn recovery_pending(&self) -> bool {
+        if let Some(status) = &self.history_status {
+            return status.pending;
+        }
         self.draft.recovery.as_ref().is_some_and(recovery_pending)
     }
 
     pub fn device_has_pending_recovery(&self, udid: &str) -> bool {
+        if self.persist && super::managed::pending_for_device(udid).unwrap_or(true) {
+            return true;
+        }
+        if self.history_error.is_some() {
+            return true;
+        }
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|binding| binding.udid == udid)
+            && self
+                .history_status
+                .as_ref()
+                .is_some_and(|status| status.pending)
+        {
+            return true;
+        }
         if self.storage_error.is_some() {
             return true;
         }
@@ -508,6 +572,16 @@ impl OverlayEditor {
             ui.add_space(8.0);
         }
         ui.label(language.text("Base artwork"));
+        if ui
+            .add_enabled(
+                self.all_effects_off(),
+                egui::Button::new(language.text("Use current card artwork for all-off")),
+            )
+            .clicked()
+        {
+            self.draft.background = None;
+            self.changed();
+        }
         if ui.button(language.text("Choose background...")).clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
@@ -643,6 +717,8 @@ impl OverlayEditor {
 
     #[cfg(test)]
     pub(crate) fn qa_state(&mut self, state: usize, directory: &Path) {
+        self.history_status = None;
+        self.history_error = None;
         self.draft.recovery = None;
         self.draft.last_applied = None;
         self.error = None;
@@ -653,6 +729,18 @@ impl OverlayEditor {
                     .into(),
             );
             self.draft.last_applied = Some(self.draft.desired_effects().selection);
+            let recovery = directory.join("illustrative-success-recovery");
+            let binding = self.target.clone().unwrap();
+            device::qa_completed_recovery(&recovery, &binding).unwrap();
+            self.install_history_status(device::ManagedOutcome {
+                verified: true,
+                incomplete: false,
+                recovery: Some(recovery),
+                selection: Some(self.draft.desired_effects().selection),
+                effects_active: true,
+                baseline_available: true,
+                pending: false,
+            });
         }
         if state == 6 {
             let recovery = directory.join("illustrative-recovery");
@@ -769,23 +857,20 @@ impl OverlayEditor {
                 Some(Ok(Message::Done(result))) => {
                     self.receiver = None;
                     match result {
+                        Ok(Completed::Managed(status, message)) => {
+                            let incomplete = status.incomplete;
+                            let verified = status.verified;
+                            self.install_history_status(status);
+                            self.status = Some(if incomplete {
+                                "Managed recovery is incomplete. Files may remain; keep the recovery selection and check the phone."
+                            } else if !verified { "Local pending operation cleared. Device state has not been verified." }
+                            else { message }.into());
+                        }
                         Ok(Completed::Preview(preview)) => {
                             let preview = *preview;
                             self.preview_issue = preview.issue;
                             self.install(ctx, preview.artwork);
                             self.status = None;
-                        }
-                        Ok(Completed::Applied(limited)) => {
-                            self.draft.prior_recovery = None;
-                            self.draft.managed_history = true;
-                            self.draft.last_applied = Some(self.draft.desired_effects().selection);
-                            if let Err(error) = self.remember() {
-                                self.error =
-                                    Some(format!("Could not save overlay settings: {error:#}"));
-                            }
-                            self.status = Some(if limited {
-                                "Experimental skin applied and bytes verified. Effect-file recovery is incomplete. Reopen Wallet and Apple Pay and check the effects."
-                            } else { "Skin applied. Force-close and reopen Wallet and Apple Pay to see the change." }.into());
                         }
                         Ok(Completed::Restored(limited)) => {
                             self.draft.last_applied = None;
@@ -825,6 +910,7 @@ impl OverlayEditor {
                                 self.draft.recovery = None;
                             }
                             self.error = Some(error);
+                            self.refresh_history();
                         }
                     }
                     if self.target.is_some()
@@ -1196,7 +1282,13 @@ impl OverlayEditor {
             return;
         }
         let result = (|| -> Result<_> {
-            let config = self.draft.configuration()?;
+            let desired = self.draft.desired_effects();
+            let alignment = self.draft.alignment.clone();
+            let legacy = self
+                .draft
+                .recovery
+                .as_ref()
+                .map(|recovery| recovery.directory.clone());
             let directory = device::new_application_directory()?;
             self.draft.prior_recovery = self.draft.recovery.clone();
             self.draft.recovery = Some(Recovery {
@@ -1204,13 +1296,16 @@ impl OverlayEditor {
                 directory: directory.join("recovery"),
             });
             self.remember()?;
-            Ok((config, directory))
+            Ok((desired, alignment, directory, legacy))
         })();
         match result {
-            Ok((config, directory)) => self.start(ctx, move |progress| {
-                Ok(Completed::Applied(device::apply(
-                    binding, config, &directory, progress,
-                )?))
+            Ok((desired, alignment, directory, legacy)) => self.start(ctx, move |progress| {
+                Ok(Completed::Managed(
+                    device::managed_apply(
+                        binding, desired, alignment, &directory, legacy, progress,
+                    )?,
+                    "Effects bytes verified. Reopen Wallet and Apple Pay and check appearance.",
+                ))
             }),
             Err(error) => {
                 if self.draft.prior_recovery.is_some()
@@ -1230,8 +1325,14 @@ impl OverlayEditor {
     pub fn can_restore(&self, binding: &Binding) -> bool {
         !self.busy()
             && self.matches_target(binding)
+            && self.history_error.is_none()
             && self.draft.recovery.as_ref().is_some_and(|recovery| {
-                recovery.binding == *binding && recovery.directory.join("journal.json").is_file()
+                recovery.binding == *binding
+                    && (recovery.directory.join("journal.json").is_file()
+                        || self
+                            .history_status
+                            .as_ref()
+                            .is_some_and(|status| status.pending))
             })
     }
 
@@ -1240,13 +1341,89 @@ impl OverlayEditor {
             return;
         }
         let recovery = self.draft.recovery.clone().unwrap();
+        let managed = self.history_status.is_some()
+            || super::recovery::load(&recovery.directory).is_ok_and(|journal| {
+                journal.kind.is_installation()
+                    && journal.status == "ParallaxCandidateReadbackMatchedAwaitingManualObservation"
+            });
         self.start(ctx, move |progress| {
             progress("Restoring previous skin…");
-            Ok(Completed::Restored(device::restore(
-                &recovery.directory,
-                &binding,
-            )?))
+            if managed {
+                Ok(Completed::Managed(device::managed_restore(binding, false, Some(recovery.directory), progress)?,
+                    "Previous managed state verified. Reopen Wallet and Apple Pay and check appearance."))
+            } else {
+                Ok(Completed::Restored(device::restore(&recovery.directory, &binding)?))
+            }
         });
+    }
+
+    pub fn can_restore_baseline(&self, binding: &Binding) -> bool {
+        !self.busy()
+            && self.matches_target(binding)
+            && self.history_error.is_none()
+            && self
+                .history_status
+                .as_ref()
+                .is_some_and(|status| status.baseline_available && !status.pending)
+    }
+
+    pub fn can_reset(&self, binding: &Binding) -> bool {
+        !self.busy()
+            && self.matches_target(binding)
+            && self.history_error.is_none()
+            && self.storage_error.is_none()
+            && !self.recovery_pending()
+            && !self.device_has_pending_recovery(&binding.udid)
+    }
+
+    pub fn reset(&mut self, ctx: &egui::Context, binding: Binding, saved_original: bool) {
+        if !self.can_reset(&binding) {
+            return;
+        }
+        let result = (|| -> Result<_> {
+            let directory = device::new_application_directory()?;
+            let legacy = self.draft.recovery.as_ref().map(|r| r.directory.clone());
+            let background = self.draft.background.clone();
+            let alignment = self.draft.alignment.clone();
+            self.draft.parallax = Some(false);
+            self.draft.cross_dissolve = false;
+            self.draft.neutral_particles_enabled = false;
+            self.draft.transaction = false;
+            self.dirty = true;
+            self.draft.prior_recovery = self.draft.recovery.clone();
+            self.draft.recovery = Some(Recovery {
+                binding: binding.clone(),
+                directory: directory.join("recovery"),
+            });
+            self.remember()?;
+            Ok((directory, legacy, background, alignment))
+        })();
+        match result {
+            Ok((directory, legacy, background, alignment)) => self.start(ctx, move |progress| {
+                Ok(Completed::Managed(
+                    device::managed_reset(binding, saved_original, background, alignment, &directory, legacy, progress)?,
+                    if saved_original {
+                        "Saved original artwork and effects removal verified. Reopen Wallet and Apple Pay and check appearance."
+                    } else {
+                        "Effects removal and background artwork bytes verified. Reopen Wallet and Apple Pay and check appearance."
+                    },
+                ))
+            }),
+            Err(error) => {
+                self.draft.recovery = self.draft.prior_recovery.take();
+                self.error = Some(format!("Could not start reset: {error:#}"));
+            }
+        }
+    }
+
+    pub fn restore_baseline(&mut self, ctx: &egui::Context, binding: Binding) {
+        if !self.can_restore_baseline(&binding) {
+            return;
+        }
+        self.start(ctx, move |progress| Ok(Completed::Managed(
+            device::managed_restore(binding, true, None, progress)?,
+            "Baseline bytes restored and verified. Reopen Wallet and Apple Pay and check appearance.",
+        )));
     }
 
     pub fn status(&self) -> Option<&str> {
@@ -1263,13 +1440,29 @@ impl OverlayEditor {
         } else if let Some(status) = &self.status {
             ui.label(language.text(status));
         }
-        if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, language.text(error));
+        let errors = [
+            self.error.as_deref(),
+            self.history_error.as_deref(),
+            self.storage_error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            let details = errors.join("\n\n");
+            egui::ScrollArea::vertical()
+                .id_salt("effects_error_details")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for error in &errors {
+                        ui.colored_label(ui.visuals().error_fg_color, language.text(error));
+                    }
+                });
             if ui
                 .small_button(language.text("Copy error details"))
                 .clicked()
             {
-                ctx.copy_text(error.clone());
+                ctx.copy_text(details);
             }
             if !self.busy()
                 && self.preview_texture.is_none()
@@ -1409,6 +1602,33 @@ mod tests {
         assert!(editor.apply_issue().unwrap().contains("Another card"));
         std::fs::remove_file(directory.join("journal.json")).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn reset_ignores_broken_drafts_and_missing_baseline_but_blocks_unfinished_work() {
+        let mut editor = isolated_editor();
+        let binding = target("card-reset");
+        editor.select_target(Some(binding.clone()));
+        editor.draft.parallax = Some(true);
+        editor.draft.transaction = true;
+        editor.draft.foreground = Some("missing.png".into());
+        assert!(editor.apply_issue().is_some());
+        assert!(!editor.can_restore_baseline(&binding));
+        assert!(editor.can_reset(&binding));
+        assert!(!editor.can_reset(&target("another-card")));
+        editor.history_status = Some(device::ManagedOutcome {
+            verified: true,
+            incomplete: true,
+            recovery: None,
+            selection: None,
+            effects_active: true,
+            baseline_available: false,
+            pending: true,
+        });
+        assert!(!editor.can_reset(&binding));
+        editor.history_status = None;
+        editor.storage_error = Some("corrupt drafts".into());
+        assert!(!editor.can_reset(&binding));
     }
 
     #[test]

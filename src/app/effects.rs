@@ -57,12 +57,22 @@ impl AirCardApp {
             self.overlay_editor.show_feedback(ctx, ui, language);
             return;
         }
-        let device_name = self.devices.iter()
+        let device_name = self
+            .devices
+            .iter()
             .find(|device| Some(&device.udid) == self.selected_udid.as_ref())
-            .map(|device| device.name.as_str()).unwrap_or_default();
-        let card_name = self.saved_cards.iter().find(|card| card.hash == self.card_hash.trim())
-            .map(|card| card.name.as_str()).unwrap_or_default();
-        ui.add(egui::Label::new(egui::RichText::new(format!("{device_name}  {card_name}")).strong()).truncate());
+            .map(|device| device.name.as_str())
+            .unwrap_or_default();
+        let card_name = self
+            .saved_cards
+            .iter()
+            .find(|card| card.hash == self.card_hash.trim())
+            .map(|card| card.name.as_str())
+            .unwrap_or_default();
+        ui.add(
+            egui::Label::new(egui::RichText::new(format!("{device_name}  {card_name}")).strong())
+                .truncate(),
+        );
         ui.label(self.card_hash.trim());
         ui.small(language.text("Draft changes do not change the phone until you apply."));
         ui.add_space(8.0);
@@ -111,21 +121,82 @@ impl AirCardApp {
             {
                 self.overlay_editor.restore(ctx, binding);
             }
-            ui.add_enabled(
-                false,
-                egui::Button::new(language.text("Restore before AirCard effects")),
-            )
-            .on_disabled_hover_text(
-                language.text("Baseline restore needs verified history and transition support."),
-            );
+            let binding = self.overlay_binding();
+            let can_baseline = !self.is_busy
+                && !self.scanning_syslog
+                && binding
+                    .as_ref()
+                    .is_some_and(|binding| self.overlay_editor.can_restore_baseline(binding));
+            if ui
+                .add_enabled(
+                    can_baseline,
+                    egui::Button::new(language.text("Restore before AirCard effects")),
+                )
+                .on_disabled_hover_text(
+                    language
+                        .text("Baseline restore is available only when its ancestry is proven."),
+                )
+                .clicked()
+                && let Some(binding) = binding
+            {
+                self.overlay_editor.restore_baseline(ctx, binding);
+            }
         });
-        ui.small(language.text("Baseline restore needs verified history and transition support."));
+        if !self
+            .overlay_editor
+            .can_restore_baseline(target.as_ref().unwrap())
+        {
+            ui.small(language.text("If baseline history is incomplete, you can still remove all managed effects below."));
+        }
+        let binding = self.overlay_binding();
+        let can_reset = !self.is_busy
+            && !self.scanning_syslog
+            && binding
+                .as_ref()
+                .is_some_and(|b| self.overlay_editor.can_reset(b));
+        let has_original = target
+            .as_ref()
+            .is_some_and(|b| crate::wallet_backup::complete_backup_exists(&b.udid, &b.card_id));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    can_reset,
+                    egui::Button::new(language.text("Remove all effects")),
+                )
+                .clicked()
+                && let Some(binding) = binding.clone()
+            {
+                self.overlay_editor.reset(ctx, binding, false);
+            }
+            if ui
+                .add_enabled(
+                    can_reset && has_original,
+                    egui::Button::new(language.text("Reset to saved original artwork")),
+                )
+                .clicked()
+                && let Some(binding) = binding.clone()
+            {
+                self.overlay_editor.reset(ctx, binding, true);
+            }
+        });
+        ui.small(language.text("Remove all effects uses the selected background and crop. With no artwork selected, it uses the recovered background without the overlay. Reset restores saved original artwork when available."));
+        if !has_original {
+            ui.small(language.text("No complete original artwork backup is available. Remove effects first, then use Wallet artwork controls. A factory reset cannot be reconstructed from missing originals."));
+        }
+        ui.small(language.text("Unknown original effect files may remain. Incomplete cleanup retains recovery and blocks further writes; protected-file deletion is not proven."));
+        if self.overlay_editor.uses_captured_static() {
+            ui.label(language.text("No artwork selection is required for removal. All-off keeps ordinary artwork, or uses the recovered background layer without the overlay."));
+        }
         if self.is_busy || self.scanning_syslog {
             ui.label(language.text("Wait for the current operation to finish."));
         } else if self.overlay_binding().is_none() {
             ui.label(language.text("Effects require one iPhone connected by USB only."));
         } else if let Some(issue) = self.overlay_editor.apply_issue() {
-            ui.label(language.text(issue));
+            ui.label(format!(
+                "{}: {}",
+                language.text("Apply effects"),
+                language.text(issue)
+            ));
         }
         self.overlay_editor.show_feedback(ctx, ui, language);
         ui.add_space(10.0);

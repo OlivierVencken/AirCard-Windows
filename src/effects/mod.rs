@@ -7,8 +7,10 @@ mod configuration;
 mod device;
 mod editor;
 mod metadata;
+mod managed;
 mod recovery;
 mod transaction;
+mod transition;
 pub(crate) mod transport;
 
 pub(crate) use editor::OverlayEditor;

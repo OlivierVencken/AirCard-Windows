@@ -1,6 +1,8 @@
 //! Bounded image preparation and checksum-verified parallax packs
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(test)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -228,6 +230,7 @@ struct FileRecord {
 }
 
 impl FileRecord {
+    #[cfg(test)]
     fn new(filename: &str, bytes: &[u8]) -> Self {
         Self {
             filename: filename.into(),
@@ -549,6 +552,7 @@ fn composite(background: &RgbaImage, foreground: &RgbaImage) -> RgbaImage {
     fallback
 }
 
+#[cfg(test)]
 fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
@@ -706,6 +710,129 @@ pub(super) fn preview_static_draft(
     })
 }
 
+/// Captured parallax backgrounds contain bleed, but never the foreground.
+/// Remove exactly our known bleed rather than refitting it as ordinary artwork.
+pub(super) fn static_from_captured_background(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let image = decode_png(bytes)?;
+    ensure!(
+        image.pixels().all(|p| p[3] == 255),
+        "Captured background must be opaque"
+    );
+    let canvas = Canvas::default();
+    let (width, height, x, y) = bleed_canvas(&canvas);
+    let image = if image.dimensions() == (canvas.width, canvas.height) {
+        image
+    } else {
+        ensure!(
+            image.dimensions() == (width, height),
+            "Captured background dimensions are unsupported; choose a background image"
+        );
+        image::imageops::crop_imm(&image, x, y, canvas.width, canvas.height).to_image()
+    };
+    ordinary_artwork(&image)
+}
+
+fn ordinary_artwork(image: &RgbaImage) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let png = encode_png(image)?;
+    let pdf = crate::image_skin::png_to_pdf(&png)?;
+    Ok(crate::wallet_backup::CARD_ARTWORK_ASSETS
+        .iter()
+        .map(|leaf| {
+            (
+                (*leaf).to_owned(),
+                if leaf.ends_with(".pdf") {
+                    pdf.clone()
+                } else {
+                    png.clone()
+                },
+            )
+        })
+        .collect())
+}
+
+/// Version-2 transition artwork. No schema-1 pack is reinterpreted. The caller
+/// freezes this exact inventory and its hashes in the managed transition.
+pub(super) fn managed_artwork(
+    desired: &super::configuration::DesiredEffects,
+    alignment: &Alignment,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let selected = desired.selection;
+    desired.validate_selected_inputs()?;
+    let preview = if selected.parallax {
+        let config = PrepareConfig {
+            schema_version: 1,
+            parallax_bleed: true,
+            dynamic_layer_configuration: selected.native_configuration().unwrap(),
+            background: desired
+                .inputs
+                .background
+                .clone()
+                .context("Choose a background image")?,
+            foreground: desired
+                .inputs
+                .foreground
+                .clone()
+                .context("Choose a transparent overlay PNG")?,
+            emitter_sprite: selected
+                .particles
+                .then(|| desired.inputs.particle_sprite.clone().unwrap()),
+            alternate_background: selected
+                .cross_dissolve
+                .then(|| desired.inputs.alternate_background.clone().unwrap()),
+            transaction_sprite: selected
+                .transaction
+                .then(|| desired.inputs.transaction_sprite.clone().unwrap()),
+            transaction_shape: selected
+                .transaction
+                .then(|| desired.inputs.transaction_shape.clone().unwrap()),
+            original_pass_json: PathBuf::new(),
+            output_directory: PathBuf::new(),
+            canvas: Canvas::default(),
+            alignment: alignment.clone(),
+        };
+        preview(&config, Path::new("."))?
+    } else {
+        preview_static_draft(desired, alignment)?.artwork
+    };
+    let mut resources = std::collections::BTreeMap::new();
+    if selected.is_empty() {
+        return ordinary_artwork(&preview.fallback);
+    }
+    use super::configuration::Resource as Role;
+    for role in selected.requirements(false).resources {
+        let bytes = match role {
+            Role::Background => encode_png(&preview.background)?,
+            Role::Foreground => encode_png(&preview.foreground)?,
+            Role::Fallback => encode_png(&preview.fallback)?,
+            Role::AlternateBackground => encode_png(
+                preview
+                    .alternate_background
+                    .as_ref()
+                    .context("Missing alternate background")?,
+            )?,
+            Role::NeutralEmitter => {
+                encode_png(preview.sprite.as_ref().context("Missing neutral sprite")?)?
+            }
+            Role::TransactionEmitter => encode_png(
+                preview
+                    .transaction_sprite
+                    .as_ref()
+                    .context("Missing transaction sprite")?,
+            )?,
+            Role::TransactionShape => preview
+                .transaction_shape
+                .clone()
+                .context("Missing transaction shape")?,
+        };
+        for leaf in role.candidate_filenames() {
+            resources.insert(leaf, bytes.clone());
+        }
+    }
+    Ok(resources)
+}
+
 fn preview_internal(
     config: &PrepareConfig,
     base: &Path,
@@ -800,6 +927,7 @@ pub fn prepare_configuration(config: &PrepareConfig, base: &Path) -> Result<Path
 
 /// Use the exact frozen layers. Re-cropping prepared moving assets would crop
 /// away their bleed and enlarge the composition again.
+#[cfg(test)]
 pub fn prepare_configuration_from_preview(
     config: &PrepareConfig,
     base: &Path,
@@ -969,6 +1097,7 @@ pub(super) fn trial_configuration(directory: &Path) -> Result<PrepareConfig> {
 }
 
 /// Prepare artwork only, without reading or creating pass metadata
+#[cfg(test)]
 pub fn prepare_artwork(config: &PrepareConfig, base: &Path) -> Result<(PathBuf, EffectsPreview)> {
     let preview = preview(config, base)?;
     let mut images = vec![
@@ -1269,6 +1398,115 @@ mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn removal_background_strips_exact_bleed_without_compositing_foreground() {
+        let canvas = Canvas::default();
+        let (width, height, x, y) = bleed_canvas(&canvas);
+        let mut background = RgbaImage::from_pixel(width, height, Rgba([0, 0, 255, 255]));
+        for py in y..y + canvas.height {
+            for px in x..x + canvas.width {
+                background.put_pixel(px, py, Rgba([240, 20, 10, 255]));
+            }
+        }
+        for image in [
+            background,
+            RgbaImage::from_pixel(canvas.width, canvas.height, Rgba([240, 20, 10, 255])),
+        ] {
+            let assets = static_from_captured_background(&encode_png(&image).unwrap()).unwrap();
+            let png = decode_png(&assets["cardBackgroundCombined@3x.png"]).unwrap();
+            assert_eq!(png.dimensions(), (canvas.width, canvas.height));
+            assert!(png.pixels().all(|p| p.0 == [240, 20, 10, 255]));
+            assert_eq!(
+                assets["cardBackgroundCombined@2x.png"],
+                assets["cardBackgroundCombined@3x.png"]
+            );
+            assert!(assets["cardBackgroundCombined.pdf"].starts_with(b"%PDF"));
+        }
+        let wrong_size = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
+        assert!(static_from_captured_background(&encode_png(&wrong_size).unwrap()).is_err());
+    }
+
+    #[test]
+    fn managed_artwork_has_exact_subset_inventory_alpha_and_static_all_off() {
+        use super::super::configuration::{DesiredEffects, Inputs};
+        let fixture = Fixture::new();
+        fixture.prepare();
+        let shape = fixture.0.join("shape.svg");
+        let svg = br#"<svg width="100" height="100"><path d="M50 5L95 95L5 95Z"/></svg>"#;
+        fs::write(&shape, svg).unwrap();
+        for bits in 0..16 {
+            let selected = super::super::transition::from_bits(bits);
+            let desired = DesiredEffects {
+                selection: selected,
+                static_foreground: false,
+                inputs: Inputs {
+                    background: Some(fixture.0.join("background.png")),
+                    foreground: Some(if selected.parallax {
+                        fixture.0.join("foreground.png")
+                    } else {
+                        fixture.0.join("missing.png")
+                    }),
+                    alternate_background: selected
+                        .cross_dissolve
+                        .then(|| fixture.0.join("background.png")),
+                    particle_sprite: selected.particles.then(|| fixture.0.join("foreground.png")),
+                    transaction_sprite: selected
+                        .transaction
+                        .then(|| fixture.0.join("foreground.png")),
+                    transaction_shape: selected.transaction.then(|| shape.clone()),
+                },
+            };
+            let resources = managed_artwork(&desired, &Alignment::default()).unwrap();
+            let expected: std::collections::BTreeSet<_> = if bits == 0 {
+                crate::wallet_backup::CARD_ARTWORK_ASSETS
+                    .iter()
+                    .map(|leaf| (*leaf).to_owned())
+                    .collect()
+            } else {
+                super::super::transition::resource_names(selected)
+            };
+            assert_eq!(
+                resources
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected
+            );
+            if bits == 0 {
+                assert!(resources["cardBackgroundCombined.pdf"].starts_with(b"%PDF-"));
+                assert!(
+                    decode_png(&resources["cardBackgroundCombined@3x.png"])
+                        .unwrap()
+                        .pixels()
+                        .all(|pixel| pixel[3] == 255)
+                );
+            } else {
+                assert_eq!(
+                    decode_png(&resources["dynamicLayerStaticFallback.png"])
+                        .unwrap()
+                        .dimensions(),
+                    (CARD_WIDTH, CARD_HEIGHT)
+                );
+                if selected.parallax {
+                    let foreground = decode_png(&resources["foregroundParallax.png"]).unwrap();
+                    assert!(foreground.pixels().any(|pixel| pixel[3] == 0));
+                    assert!(foreground.width() > CARD_WIDTH);
+                }
+                if selected.particles {
+                    assert_eq!(
+                        decode_png(&resources["neutralEmitter.png"])
+                            .unwrap()
+                            .dimensions(),
+                        (4, 2)
+                    );
+                }
+                if selected.transaction {
+                    assert_eq!(resources["transactionEffectShape.svg"], svg);
+                }
+            }
+        }
+    }
 
     #[test]
     fn standalone_static_preview_reuses_crop_and_ignores_disabled_missing_assets() {

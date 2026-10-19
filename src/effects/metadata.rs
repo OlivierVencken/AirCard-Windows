@@ -174,6 +174,46 @@ pub fn candidate(original: &[u8], config: &DynamicConfiguration) -> Result<(Vec<
     ))
 }
 
+/// Managed-only replacement. The caller must reconcile the complete fresh
+/// snapshot against owned history before supplying its exact metadata checksum.
+/// The legacy additive-only `candidate` contract remains unchanged.
+pub(super) fn replace_managed(
+    original: &[u8],
+    expected_sha256: &str,
+    desired: super::configuration::Selection,
+) -> Result<Vec<u8>> {
+    ensure!(
+        sha256(original) == expected_sha256,
+        "Managed metadata preimage changed"
+    );
+    let mut value = parse_unique(original)?;
+    let object = value
+        .as_object_mut()
+        .filter(|object| !object.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Complete captured pass JSON is required"))?;
+    let dynamic = desired
+        .native_configuration()
+        .map(serde_json::to_value)
+        .transpose()?;
+    if object.get("dynamicLayerConfiguration") == dynamic.as_ref() {
+        return Ok(original.to_vec());
+    }
+    match dynamic {
+        Some(dynamic) => {
+            object.insert("dynamicLayerConfiguration".into(), dynamic);
+        }
+        None => {
+            object.remove("dynamicLayerConfiguration");
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&value)?;
+    ensure!(
+        bytes.len() <= MAX_JSON_BYTES,
+        "Managed metadata exceeds 4 MiB"
+    );
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::artwork::{
