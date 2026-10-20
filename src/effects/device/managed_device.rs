@@ -166,13 +166,10 @@ fn prepare_artwork(
         // bytes rather than guessing which raster represents a preferred PDF.
         return crate::wallet_backup::CARD_ARTWORK_ASSETS
             .iter()
-            .map(|leaf| {
-                Ok((
-                    (*leaf).to_owned(),
-                    source.resources[*leaf]
-                        .clone()
-                        .context("Current ordinary artwork was not recovered")?,
-                ))
+            .filter_map(|leaf| {
+                source.resources[*leaf]
+                    .clone()
+                    .map(|blob| Ok(((*leaf).to_owned(), blob)))
             })
             .collect();
     }
@@ -188,9 +185,9 @@ fn prepare_artwork(
                         && blob.is_some()),
                 "A PDF overrides the captured background PNG; choose an explicit background image"
             );
-            let original = source.resources.get("backgroundParallax@3x.png")
-                .and_then(Option::as_ref)
-                .context("Current background layer could not be recovered safely; choose a background image")?;
+            let original = captured_background(source, true).context(
+                "Current background layer could not be recovered safely; choose a background image",
+            )?;
             let bytes = original.read()?;
             return artwork::static_from_captured_background(&bytes)?
                 .into_iter()
@@ -200,18 +197,34 @@ fn prepare_artwork(
                 })
                 .collect();
         }
-        let leaf = "cardBackgroundCombined@3x.png";
-        let original = source
-            .resources
-            .get(leaf)
-            .and_then(Option::as_ref)
-            .context(
-                "Current static artwork could not be recovered safely; choose a background image",
-            )?;
+        let original = captured_background(source, false).context(
+            "Current static artwork could not be recovered safely; choose a background image",
+        )?;
         original.read()?;
         desired.inputs.background = Some(original.path.clone());
     }
     freeze_artwork(&desired, alignment, directory)
+}
+
+fn captured_background(source: &Snapshot, dynamic: bool) -> Option<&Blob> {
+    // This is local background recovery, not a claim about the phone's active
+    // screen scale. Prefer the highest recovered raster; never use the flattened
+    // dynamic fallback because it already contains the foreground.
+    let names: &[&str] = if dynamic {
+        &[
+            "backgroundParallax@3x.png",
+            "backgroundParallax@2x.png",
+            "backgroundParallax.png",
+        ]
+    } else {
+        &[
+            "cardBackgroundCombined@3x.png",
+            "cardBackgroundCombined@2x.png",
+        ]
+    };
+    names
+        .iter()
+        .find_map(|leaf| source.resources.get(*leaf).and_then(Option::as_ref))
 }
 
 fn freeze_artwork(
@@ -435,7 +448,14 @@ fn run(
         needs_recovery = false;
         let source = snapshot(&recovery, &load(&recovery)?)?;
         source_snapshot = Some(source.clone());
-        let (plan, next) = build(&source, store)?;
+        let planned = build(&source, store);
+        match &planned {
+            Ok((plan, _)) => compatibility_report(directory, &source, Some(plan), None)?,
+            Err(error) => {
+                compatibility_report(directory, &source, None, Some(&format!("{error:#}")))?
+            }
+        }
+        let (plan, next) = planned?;
         if plan.is_noop(&source) && mode == Mode::Apply {
             store.index.expected = Some(source);
             store.abort_after_verified_recovery()?;
@@ -517,6 +537,54 @@ fn run(
         )));
     }
     outcome(store)
+}
+
+/// Local diagnostic evidence for testing a different phone/build. This report
+/// is never read as recovery state, and never implies native playback support.
+fn compatibility_report(
+    directory: &Path,
+    source: &Snapshot,
+    plan: Option<&transition::Plan>,
+    error: Option<&str>,
+) -> Result<()> {
+    let recovered: BTreeMap<_, _> = source
+        .resources
+        .iter()
+        .filter_map(|(leaf, blob)| blob.as_ref().map(|blob| (leaf, &blob.sha256)))
+        .collect();
+    let unknown: Vec<_> = source
+        .resources
+        .iter()
+        .filter_map(|(leaf, blob)| blob.is_none().then_some(leaf))
+        .collect();
+    let writes: Vec<_> = plan
+        .into_iter()
+        .flat_map(|plan| &plan.changes)
+        .map(|change| {
+            serde_json::json!({
+                "file": change.leaf,
+                "preimage_sha256": change.expected_preimage,
+                "candidate_sha256": change.after.sha256,
+            })
+        })
+        .collect();
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "product_type": source.binding.product_type,
+        "build": source.binding.build,
+        "metadata_sha256": source.metadata.sha256,
+        "recovered_resources": recovered,
+        "unknown_resources": unknown,
+        "planned_artwork_writes": writes,
+        "trial_policy": plan.map(|plan| plan.policy),
+        "preflight_error": error,
+        "native_playback_verified": false,
+    });
+    Blob::freeze(
+        &directory.join("compatibility.json"),
+        &serde_json::to_vec_pretty(&report)?,
+    )?;
+    Ok(())
 }
 
 fn install_managed(reference: &history::Reference, needs_recovery: &mut bool) -> Result<()> {
@@ -951,6 +1019,72 @@ mod tests {
         let directory = fixture.directory();
         assert!(
             prepare_artwork(Default::default(), &Default::default(), &source, &directory).is_err()
+        );
+        // A card with only the 2x filename is usable when its recovered geometry
+        // is understood. Preserve the existing size/bleed guard for other sizes.
+        source.resources.insert(
+            "backgroundParallax@2x.png".into(),
+            Some(fixture.blob(&bytes)),
+        );
+        let directory = fixture.directory();
+        let assets =
+            prepare_artwork(Default::default(), &Default::default(), &source, &directory).unwrap();
+        let output =
+            image::load_from_memory(&assets["cardBackgroundCombined@3x.png"].read().unwrap())
+                .unwrap()
+                .to_rgba8();
+        assert!(output.pixels().all(|p| p.0 == [10, 120, 30, 255]));
+    }
+
+    #[test]
+    fn preserving_partial_ordinary_artwork_keeps_exact_bytes_including_pdf_only_cards() {
+        let fixture = Fixture::new();
+        for retained in crate::wallet_backup::CARD_ARTWORK_ASSETS {
+            let mut source = fixture.snapshot(0, "current");
+            for leaf in crate::wallet_backup::CARD_ARTWORK_ASSETS {
+                if leaf != retained {
+                    source.resources.insert(leaf.to_string(), None);
+                }
+            }
+            let directory = fixture.directory();
+            let assets =
+                prepare_artwork(Default::default(), &Default::default(), &source, &directory)
+                    .unwrap();
+            assert_eq!(assets.len(), 1);
+            assert_eq!(
+                assets[retained],
+                *source.resources[retained].as_ref().unwrap()
+            );
+            let plan = transition::reset(&source, None, None, &assets).unwrap();
+            assert!(plan.is_noop(&source));
+        }
+    }
+
+    #[test]
+    fn compatibility_report_records_preflight_and_unknowns_without_claiming_playback_or_overwriting()
+     {
+        let fixture = Fixture::new();
+        let mut source = fixture.snapshot(0, "source");
+        source
+            .resources
+            .insert("foregroundParallax@3x.png".into(), None);
+        let directory = fixture.directory();
+        compatibility_report(&directory, &source, None, Some("no recovered foreground")).unwrap();
+        let bytes = fs::read(directory.join("compatibility.json")).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["build"], source.binding.build);
+        assert_eq!(report["native_playback_verified"], false);
+        assert_eq!(report["preflight_error"], "no recovered foreground");
+        assert!(
+            report["unknown_resources"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("foregroundParallax@3x.png"))
+        );
+        assert!(compatibility_report(&directory, &source, None, None).is_err());
+        assert_eq!(
+            fs::read(directory.join("compatibility.json")).unwrap(),
+            bytes
         );
     }
 
